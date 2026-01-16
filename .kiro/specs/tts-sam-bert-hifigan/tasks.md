@@ -36,7 +36,9 @@
   - Add shape logging in forward pass
   - _Requirements: 1.1, 1.2, 1.3_
 
-- [-] 4. Implement Phoneme Embedding module
+- [x] 4. Implement Phoneme Embedding module
+
+
 
 
 
