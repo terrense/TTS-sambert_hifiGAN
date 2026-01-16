@@ -267,3 +267,159 @@ class LengthRegulator(nn.Module):
         print(f"[LengthRegulator] Output Hlr shape: {Hlr.shape}")
         
         return Hlr
+
+
+class PitchPredictor(nn.Module):
+    """
+    Pitch Predictor for predicting and embedding pitch features.
+    
+    This module predicts phoneme-level pitch values, quantizes them into discrete bins,
+    expands them to frame-level using duration information, and converts them to
+    continuous embeddings for integration with other acoustic features.
+    
+    Architecture:
+        1. Prediction: Reuses DurationPredictor architecture (Conv1d + LayerNorm)
+        2. Quantization: Maps continuous pitch to discrete bins
+        3. Expansion: Expands phoneme-level to frame-level using duration
+        4. Embedding: Converts discrete bins to continuous embeddings
+    
+    Args:
+        d_model (int): Input feature dimension
+        n_bins (int): Number of pitch quantization bins (default: 256)
+        pitch_min (float): Minimum pitch value in Hz (default: 80)
+        pitch_max (float): Maximum pitch value in Hz (default: 600)
+        n_layers (int): Number of convolutional layers (default: 2)
+        kernel_size (int): Convolution kernel size (default: 3)
+        dropout (float): Dropout rate (default: 0.1)
+    
+    Shape:
+        - Input Henc: [B, Tph, d_model] phoneme-level features
+        - Input dur: [B, Tph] duration for expansion
+        - Output pitch_tok: [B, Tph] phoneme-level pitch predictions
+        - Output pitch_frm: [B, Tfrm] frame-level pitch values
+        - Output Ep: [B, Tfrm, d_model] pitch embeddings
+    
+    References:
+        - FastSpeech 2: Fast and High-Quality End-to-End Text to Speech (Ren et al., 2020)
+    """
+    
+    def __init__(self, d_model, n_bins=256, pitch_min=80.0, pitch_max=600.0,
+                 n_layers=2, kernel_size=3, dropout=0.1):
+        super(PitchPredictor, self).__init__()
+        
+        self.d_model = d_model
+        self.n_bins = n_bins
+        self.pitch_min = pitch_min
+        self.pitch_max = pitch_max
+        
+        # Reuse DurationPredictor architecture for pitch prediction
+        self.predictor = DurationPredictor(
+            d_model=d_model,
+            n_layers=n_layers,
+            kernel_size=kernel_size,
+            dropout=dropout
+        )
+        
+        # Embedding layer for pitch bins
+        # Maps discrete pitch bins to continuous embeddings
+        self.pitch_emb = nn.Embedding(n_bins, d_model)
+        
+        # Length regulator for expanding phoneme-level to frame-level
+        self.length_regulator = LengthRegulator()
+    
+    def quantize_pitch(self, pitch_continuous):
+        """
+        Quantize continuous pitch values into discrete bins.
+        
+        Maps pitch values from continuous range [pitch_min, pitch_max] to
+        discrete bins [0, n_bins-1]. Values outside the range are clamped.
+        
+        Args:
+            pitch_continuous (torch.FloatTensor): Continuous pitch values
+                Can be any shape [...], typically [B, Tph] or [B, Tfrm]
+        
+        Returns:
+            pitch_bins (torch.LongTensor): Quantized pitch bins, same shape as input
+                Values in range [0, n_bins-1]
+        """
+        # Clamp pitch values to valid range
+        pitch_clamped = torch.clamp(pitch_continuous, self.pitch_min, self.pitch_max)
+        
+        # Normalize to [0, 1]
+        pitch_normalized = (pitch_clamped - self.pitch_min) / (self.pitch_max - self.pitch_min)
+        
+        # Map to bins [0, n_bins-1]
+        pitch_bins = (pitch_normalized * (self.n_bins - 1)).long()
+        
+        # Ensure bins are in valid range
+        pitch_bins = torch.clamp(pitch_bins, 0, self.n_bins - 1)
+        
+        return pitch_bins
+    
+    def forward(self, Henc, dur, pitch_gt=None):
+        """
+        Forward pass of Pitch Predictor.
+        
+        Training mode (pitch_gt provided):
+            - Predicts phoneme-level pitch
+            - Uses ground truth pitch for quantization and embedding
+            - Returns predictions for loss computation
+        
+        Inference mode (pitch_gt is None):
+            - Predicts phoneme-level pitch
+            - Uses predicted pitch for quantization and embedding
+            - Returns pitch embeddings for acoustic model
+        
+        Args:
+            Henc (torch.FloatTensor): Encoder output [B, Tph, d_model]
+            dur (torch.LongTensor): Duration for expansion [B, Tph]
+            pitch_gt (torch.FloatTensor, optional): Ground truth pitch [B, Tfrm]
+                Only used during training for teacher forcing
+        
+        Returns:
+            pitch_tok (torch.FloatTensor): Phoneme-level pitch predictions [B, Tph]
+            pitch_frm (torch.FloatTensor): Frame-level pitch values [B, Tfrm]
+            Ep (torch.FloatTensor): Pitch embeddings [B, Tfrm, d_model]
+        """
+        # Shape logging
+        print(f"[PitchPredictor] Input Henc shape: {Henc.shape}")
+        print(f"[PitchPredictor] Input dur shape: {dur.shape}")
+        if pitch_gt is not None:
+            print(f"[PitchPredictor] Input pitch_gt shape: {pitch_gt.shape}")
+        
+        # ==================== Step 1: Predict phoneme-level pitch ====================
+        # Use the predictor (DurationPredictor architecture) to predict pitch
+        # Output is continuous pitch values at phoneme level
+        pitch_tok = self.predictor(Henc)  # [B, Tph]
+        print(f"[PitchPredictor] Predicted pitch_tok shape: {pitch_tok.shape}")
+        
+        # ==================== Step 2: Expand to frame-level ====================
+        # Expand phoneme-level pitch to frame-level using duration
+        # Each phoneme's pitch is repeated according to its duration
+        pitch_tok_expanded = pitch_tok.unsqueeze(-1)  # [B, Tph, 1]
+        
+        # Use length regulator to expand
+        pitch_frm_expanded = self.length_regulator(pitch_tok_expanded, dur)  # [B, Tfrm, 1]
+        pitch_frm = pitch_frm_expanded.squeeze(-1)  # [B, Tfrm]
+        print(f"[PitchPredictor] Expanded pitch_frm shape: {pitch_frm.shape}")
+        
+        # ==================== Step 3: Quantization and Embedding ====================
+        if pitch_gt is not None:
+            # Training mode: use ground truth pitch for embedding
+            # This is teacher forcing for better training stability
+            pitch_for_embedding = pitch_gt
+            print(f"[PitchPredictor] Using ground truth pitch for embedding")
+        else:
+            # Inference mode: use predicted pitch for embedding
+            pitch_for_embedding = pitch_frm
+            print(f"[PitchPredictor] Using predicted pitch for embedding")
+        
+        # Quantize continuous pitch to discrete bins
+        pitch_bins = self.quantize_pitch(pitch_for_embedding)  # [B, Tfrm]
+        print(f"[PitchPredictor] Quantized pitch_bins shape: {pitch_bins.shape}")
+        
+        # Convert bins to embeddings
+        Ep = self.pitch_emb(pitch_bins)  # [B, Tfrm, d_model]
+        print(f"[PitchPredictor] Output Ep shape: {Ep.shape}")
+        
+        return pitch_tok, pitch_frm, Ep

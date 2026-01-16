@@ -73,7 +73,12 @@
   - Add shape logging
   - _Requirements: 4.1, 4.3_
 
-- [ ] 7. Implement Length Regulator
+- [x] 7. Implement Length Regulator
+
+
+
+
+
 
 
 
@@ -88,7 +93,12 @@
   - Add shape logging
   - _Requirements: 5.1, 5.2, 5.3, 5.4_
 
-- [ ] 8. Implement Pitch Predictor
+- [x] 8. Implement Pitch Predictor
+
+
+
+
+
   - Add PitchPredictor class to models/variance_adaptor.py
   - Reuse DurationPredictor architecture for prediction
   - Implement pitch quantization with n_bins and embedding layer
