@@ -48,7 +48,12 @@
   - Add shape logging for input and output tensors
   - _Requirements: 2.1, 2.2, 2.3_
 
-- [ ] 5. Implement BERT Encoder
+- [x] 5. Implement BERT Encoder
+
+
+
+
+
   - Create models/bert_encoder.py with BERTEncoder class
   - Implement multi-layer Transformer Encoder using nn.TransformerEncoderLayer
   - Support configurable n_layers, n_heads, d_model, d_ff, dropout
