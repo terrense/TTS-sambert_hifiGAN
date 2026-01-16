@@ -36,7 +36,10 @@
   - Add shape logging in forward pass
   - _Requirements: 1.1, 1.2, 1.3_
 
-- [ ] 4. Implement Phoneme Embedding module
+- [-] 4. Implement Phoneme Embedding module
+
+
+
   - Create models/phoneme_embedding.py with PhonemeEmbedding class
   - Implement three embedding layers for ph_ids, tone_ids, boundary_ids
   - Sum embeddings to produce H0 [B, Tph, d_model]
