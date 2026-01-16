@@ -1,0 +1,51 @@
+# Main configuration file for TTS System
+
+# Audio processing parameters
+audio:
+  sample_rate: 22050
+  n_fft: 1024
+  hop_length: 256
+  win_length: 1024
+  n_mels: 80
+  fmin: 0
+  fmax: 8000
+  mel_scale: "slaney"  # or "htk"
+  norm: "slaney"
+  log_base: 10.0  # or "e" for natural log
+
+# Training parameters
+training:
+  acoustic:
+    batch_size: 16
+    learning_rate: 0.0001
+    max_epochs: 1000
+    gradient_clip: 1.0
+    save_interval: 5000
+    log_interval: 100
+    
+  vocoder:
+    batch_size: 16
+    learning_rate: 0.0002
+    learning_rate_discriminator: 0.0002
+    max_epochs: 500
+    gradient_clip: null
+    save_interval: 5000
+    log_interval: 100
+
+# Loss weights
+loss_weights:
+  mel: 1.0
+  dur: 1.0
+  pitch: 1.0
+  energy: 1.0
+
+# Paths
+paths:
+  data_dir: "data/train"
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+  output_dir: "outputs"
+
+# Debug settings
+debug:
+  print_shapes: false  # Set to true to enable shape logging

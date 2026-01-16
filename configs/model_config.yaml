@@ -1,0 +1,64 @@
+# Model hyperparameters configuration
+
+# Front-end configuration
+frontend:
+  vocab_size: 300
+  tone_size: 10
+  boundary_size: 5
+
+# SAM-BERT Acoustic Model configuration
+acoustic_model:
+  # Phoneme Embedding
+  d_model: 256
+  
+  # BERT Encoder
+  encoder:
+    n_layers: 6
+    n_heads: 4
+    d_ff: 1024
+    dropout: 0.1
+  
+  # Variance Adaptor
+  variance_adaptor:
+    # Duration Predictor
+    duration_predictor:
+      n_layers: 2
+      kernel_size: 3
+      dropout: 0.1
+    
+    # Pitch Predictor
+    pitch_predictor:
+      n_bins: 256
+      pitch_min: 80
+      pitch_max: 600
+    
+    # Energy Predictor
+    energy_predictor:
+      n_bins: 256
+  
+  # PNCA AR-Decoder
+  decoder:
+    n_layers: 6
+    n_heads: 8
+    d_ff: 2048
+    dropout: 0.1
+    chunk_size: 1  # For streaming inference
+
+# HiFi-GAN Vocoder configuration
+vocoder:
+  generator:
+    # Upsampling configuration
+    upsample_rates: [8, 8, 2, 2]  # Product should equal hop_length (256)
+    upsample_kernel_sizes: [16, 16, 4, 4]
+    upsample_initial_channel: 512
+    
+    # Multi-Receptive Field (MRF) configuration
+    resblock_kernel_sizes: [3, 7, 11]
+    resblock_dilation_sizes: [[1, 3, 5], [1, 3, 5], [1, 3, 5]]
+  
+  discriminator:
+    # Multi-Period Discriminator
+    mpd_periods: [2, 3, 5, 7, 11]
+    
+    # Multi-Scale Discriminator
+    msd_scales: 3  # Number of discriminators at different scales
