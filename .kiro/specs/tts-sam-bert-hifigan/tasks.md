@@ -24,7 +24,12 @@
   - Add shape logging for mel extraction
   - _Requirements: 15.2, 15.3_
 
-- [ ] 3. Implement Front-end text processing module
+- [x] 3. Implement Front-end text processing module
+
+
+
+
+
   - Create models/frontend.py with FrontEnd class
   - Implement simple character-to-token mapping (pseudo G2P)
   - Output LinguisticFeature dataclass with ph_ids [B, Tph], tone_ids [B, Tph], boundary_ids [B, Tph]
