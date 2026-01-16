@@ -61,7 +61,12 @@
   - Add shape logging for input and output
   - _Requirements: 3.1, 3.2, 3.3, 3.4_
 
-- [ ] 6. Implement Duration Predictor
+- [x] 6. Implement Duration Predictor
+
+
+
+
+
   - Create models/variance_adaptor.py with DurationPredictor class
   - Use Conv1d layers with ReLU and LayerNorm
   - Input Henc [B, Tph, d], output log_dur_pred [B, Tph]
