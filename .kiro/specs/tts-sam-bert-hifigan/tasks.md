@@ -74,6 +74,14 @@
   - _Requirements: 4.1, 4.3_
 
 - [ ] 7. Implement Length Regulator
+
+
+
+
+
+
+
+
   - Add LengthRegulator class to models/variance_adaptor.py
   - Implement repeat logic using torch.repeat_interleave based on duration
   - Input Henc [B, Tph, d] and dur [B, Tph], output Hlr [B, Tfrm, d]
