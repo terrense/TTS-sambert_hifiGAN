@@ -423,3 +423,159 @@ class PitchPredictor(nn.Module):
         print(f"[PitchPredictor] Output Ep shape: {Ep.shape}")
         
         return pitch_tok, pitch_frm, Ep
+
+
+class EnergyPredictor(nn.Module):
+    """
+    Energy Predictor for predicting and embedding energy features.
+    
+    This module predicts phoneme-level energy values, quantizes them into discrete bins,
+    expands them to frame-level using duration information, and converts them to
+    continuous embeddings for integration with other acoustic features.
+    
+    Architecture:
+        1. Prediction: Reuses DurationPredictor architecture (Conv1d + LayerNorm)
+        2. Quantization: Maps continuous energy to discrete bins
+        3. Expansion: Expands phoneme-level to frame-level using duration
+        4. Embedding: Converts discrete bins to continuous embeddings
+    
+    Args:
+        d_model (int): Input feature dimension
+        n_bins (int): Number of energy quantization bins (default: 256)
+        energy_min (float): Minimum energy value (default: 0.0)
+        energy_max (float): Maximum energy value (default: 1.0)
+        n_layers (int): Number of convolutional layers (default: 2)
+        kernel_size (int): Convolution kernel size (default: 3)
+        dropout (float): Dropout rate (default: 0.1)
+    
+    Shape:
+        - Input Henc: [B, Tph, d_model] phoneme-level features
+        - Input dur: [B, Tph] duration for expansion
+        - Output energy_tok: [B, Tph] phoneme-level energy predictions
+        - Output energy_frm: [B, Tfrm] frame-level energy values
+        - Output Ee: [B, Tfrm, d_model] energy embeddings
+    
+    References:
+        - FastSpeech 2: Fast and High-Quality End-to-End Text to Speech (Ren et al., 2020)
+    """
+    
+    def __init__(self, d_model, n_bins=256, energy_min=0.0, energy_max=1.0,
+                 n_layers=2, kernel_size=3, dropout=0.1):
+        super(EnergyPredictor, self).__init__()
+        
+        self.d_model = d_model
+        self.n_bins = n_bins
+        self.energy_min = energy_min
+        self.energy_max = energy_max
+        
+        # Reuse DurationPredictor architecture for energy prediction
+        self.predictor = DurationPredictor(
+            d_model=d_model,
+            n_layers=n_layers,
+            kernel_size=kernel_size,
+            dropout=dropout
+        )
+        
+        # Embedding layer for energy bins
+        # Maps discrete energy bins to continuous embeddings
+        self.energy_emb = nn.Embedding(n_bins, d_model)
+        
+        # Length regulator for expanding phoneme-level to frame-level
+        self.length_regulator = LengthRegulator()
+    
+    def quantize_energy(self, energy_continuous):
+        """
+        Quantize continuous energy values into discrete bins.
+        
+        Maps energy values from continuous range [energy_min, energy_max] to
+        discrete bins [0, n_bins-1]. Values outside the range are clamped.
+        
+        Args:
+            energy_continuous (torch.FloatTensor): Continuous energy values
+                Can be any shape [...], typically [B, Tph] or [B, Tfrm]
+        
+        Returns:
+            energy_bins (torch.LongTensor): Quantized energy bins, same shape as input
+                Values in range [0, n_bins-1]
+        """
+        # Clamp energy values to valid range
+        energy_clamped = torch.clamp(energy_continuous, self.energy_min, self.energy_max)
+        
+        # Normalize to [0, 1]
+        energy_normalized = (energy_clamped - self.energy_min) / (self.energy_max - self.energy_min + 1e-8)
+        
+        # Map to bins [0, n_bins-1]
+        energy_bins = (energy_normalized * (self.n_bins - 1)).long()
+        
+        # Ensure bins are in valid range
+        energy_bins = torch.clamp(energy_bins, 0, self.n_bins - 1)
+        
+        return energy_bins
+    
+    def forward(self, Henc, dur, energy_gt=None):
+        """
+        Forward pass of Energy Predictor.
+        
+        Training mode (energy_gt provided):
+            - Predicts phoneme-level energy
+            - Uses ground truth energy for quantization and embedding
+            - Returns predictions for loss computation
+        
+        Inference mode (energy_gt is None):
+            - Predicts phoneme-level energy
+            - Uses predicted energy for quantization and embedding
+            - Returns energy embeddings for acoustic model
+        
+        Args:
+            Henc (torch.FloatTensor): Encoder output [B, Tph, d_model]
+            dur (torch.LongTensor): Duration for expansion [B, Tph]
+            energy_gt (torch.FloatTensor, optional): Ground truth energy [B, Tfrm]
+                Only used during training for teacher forcing
+        
+        Returns:
+            energy_tok (torch.FloatTensor): Phoneme-level energy predictions [B, Tph]
+            energy_frm (torch.FloatTensor): Frame-level energy values [B, Tfrm]
+            Ee (torch.FloatTensor): Energy embeddings [B, Tfrm, d_model]
+        """
+        # Shape logging
+        print(f"[EnergyPredictor] Input Henc shape: {Henc.shape}")
+        print(f"[EnergyPredictor] Input dur shape: {dur.shape}")
+        if energy_gt is not None:
+            print(f"[EnergyPredictor] Input energy_gt shape: {energy_gt.shape}")
+        
+        # ==================== Step 1: Predict phoneme-level energy ====================
+        # Use the predictor (DurationPredictor architecture) to predict energy
+        # Output is continuous energy values at phoneme level
+        energy_tok = self.predictor(Henc)  # [B, Tph]
+        print(f"[EnergyPredictor] Predicted energy_tok shape: {energy_tok.shape}")
+        
+        # ==================== Step 2: Expand to frame-level ====================
+        # Expand phoneme-level energy to frame-level using duration
+        # Each phoneme's energy is repeated according to its duration
+        energy_tok_expanded = energy_tok.unsqueeze(-1)  # [B, Tph, 1]
+        
+        # Use length regulator to expand
+        energy_frm_expanded = self.length_regulator(energy_tok_expanded, dur)  # [B, Tfrm, 1]
+        energy_frm = energy_frm_expanded.squeeze(-1)  # [B, Tfrm]
+        print(f"[EnergyPredictor] Expanded energy_frm shape: {energy_frm.shape}")
+        
+        # ==================== Step 3: Quantization and Embedding ====================
+        if energy_gt is not None:
+            # Training mode: use ground truth energy for embedding
+            # This is teacher forcing for better training stability
+            energy_for_embedding = energy_gt
+            print(f"[EnergyPredictor] Using ground truth energy for embedding")
+        else:
+            # Inference mode: use predicted energy for embedding
+            energy_for_embedding = energy_frm
+            print(f"[EnergyPredictor] Using predicted energy for embedding")
+        
+        # Quantize continuous energy to discrete bins
+        energy_bins = self.quantize_energy(energy_for_embedding)  # [B, Tfrm]
+        print(f"[EnergyPredictor] Quantized energy_bins shape: {energy_bins.shape}")
+        
+        # Convert bins to embeddings
+        Ee = self.energy_emb(energy_bins)  # [B, Tfrm, d_model]
+        print(f"[EnergyPredictor] Output Ee shape: {Ee.shape}")
+        
+        return energy_tok, energy_frm, Ee

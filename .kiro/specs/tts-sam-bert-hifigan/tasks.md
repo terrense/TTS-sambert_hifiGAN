@@ -107,7 +107,12 @@
   - Add shape logging for all intermediate tensors
   - _Requirements: 6.1, 6.2, 6.3, 6.4_
 
-- [ ] 9. Implement Energy Predictor
+- [x] 9. Implement Energy Predictor
+
+
+
+
+
   - Add EnergyPredictor class to models/variance_adaptor.py
   - Similar architecture to PitchPredictor
   - Output energy_tok [B, Tph], energy_frm [B, Tfrm], Ee [B, Tfrm, d]
