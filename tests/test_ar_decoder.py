@@ -64,7 +64,8 @@ def test_ar_decoder_inference():
         n_layers=2,  # Use fewer layers for faster test
         n_heads=4,
         d_ff=512,
-        dropout=0.1
+        dropout=0.1,
+        chunk_size=1  # Single frame generation
     )
     decoder.eval()
     
@@ -78,6 +79,90 @@ def test_ar_decoder_inference():
     # Check output shape
     assert mel_pred.shape == (B, Tfrm, n_mels), \
         f"Expected shape {(B, Tfrm, n_mels)}, got {mel_pred.shape}"
+
+
+def test_ar_decoder_chunk_based_inference():
+    """Test AR-Decoder chunk-based autoregressive generation."""
+    B, Tfrm, d_model, n_mels = 2, 50, 256, 80
+    chunk_size = 5
+    
+    decoder = PNCAARDecoder(
+        d_model=d_model,
+        n_mels=n_mels,
+        n_layers=2,
+        n_heads=4,
+        d_ff=512,
+        dropout=0.1,
+        chunk_size=chunk_size
+    )
+    decoder.eval()
+    
+    # Create random input
+    Hvar = torch.randn(B, Tfrm, d_model)
+    
+    # Forward pass with chunk-based generation
+    with torch.no_grad():
+        mel_pred = decoder(Hvar, mel_gt=None, max_len=Tfrm)
+    
+    # Check output shape
+    assert mel_pred.shape == (B, Tfrm, n_mels), \
+        f"Expected shape {(B, Tfrm, n_mels)}, got {mel_pred.shape}"
+    
+    # Check that output is not all zeros
+    assert not torch.allclose(mel_pred, torch.zeros_like(mel_pred)), \
+        "Output should not be all zeros"
+
+
+def test_ar_decoder_max_len_parameter():
+    """Test AR-Decoder with different max_len values."""
+    B, Tfrm, d_model, n_mels = 2, 100, 256, 80
+    
+    decoder = PNCAARDecoder(
+        d_model=d_model,
+        n_mels=n_mels,
+        n_layers=2,
+        n_heads=4,
+        d_ff=512,
+        dropout=0.1,
+        chunk_size=10
+    )
+    decoder.eval()
+    
+    # Create random input
+    Hvar = torch.randn(B, Tfrm, d_model)
+    
+    # Test with different max_len values
+    for max_len in [30, 50, 75]:
+        with torch.no_grad():
+            mel_pred = decoder(Hvar, mel_gt=None, max_len=max_len)
+        
+        assert mel_pred.shape == (B, max_len, n_mels), \
+            f"Expected shape {(B, max_len, n_mels)}, got {mel_pred.shape}"
+
+
+def test_ar_decoder_chunk_sizes():
+    """Test AR-Decoder with various chunk sizes."""
+    B, Tfrm, d_model, n_mels = 2, 60, 256, 80
+    
+    for chunk_size in [1, 3, 5, 10, 20]:
+        decoder = PNCAARDecoder(
+            d_model=d_model,
+            n_mels=n_mels,
+            n_layers=2,
+            n_heads=4,
+            d_ff=512,
+            dropout=0.1,
+            chunk_size=chunk_size
+        )
+        decoder.eval()
+        
+        Hvar = torch.randn(B, Tfrm, d_model)
+        
+        with torch.no_grad():
+            mel_pred = decoder(Hvar, mel_gt=None, max_len=Tfrm)
+        
+        assert mel_pred.shape == (B, Tfrm, n_mels), \
+            f"Failed for chunk_size={chunk_size}: expected {(B, Tfrm, n_mels)}, got {mel_pred.shape}"
 
 
 def test_ar_decoder_shift_mel_right():

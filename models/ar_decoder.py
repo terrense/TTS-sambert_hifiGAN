@@ -166,7 +166,11 @@ class PNCAARDecoder(nn.Module):
     
     def _forward_autoregressive(self, Hvar, max_len=None):
         """
-        Forward pass with autoregressive generation for inference.
+        Forward pass with chunk-based autoregressive generation for inference.
+        
+        Generates mel-spectrogram frames in chunks for efficient streaming inference.
+        Each iteration generates chunk_size frames at a time by running the decoder
+        multiple times within each chunk.
         
         Args:
             Hvar: Encoder output [B, Tfrm, d_model]
@@ -181,39 +185,55 @@ class PNCAARDecoder(nn.Module):
             max_len = Tfrm
         
         print(f"[PNCAARDecoder] Inference mode - Input Hvar shape: {Hvar.shape}")
-        print(f"[PNCAARDecoder] Generating {max_len} frames autoregressively")
+        print(f"[PNCAARDecoder] Generating {max_len} frames autoregressively with chunk_size={self.chunk_size}")
         
         # Initialize with zeros (start token)
         mel_pred = torch.zeros(B, 1, self.n_mels, device=Hvar.device)
+        print(f"[PNCAARDecoder] Initial mel_pred shape: {mel_pred.shape}")
         
-        # Generate frames autoregressively
-        for t in range(max_len):
-            # Pass current sequence through prenet
-            tgt = self.prenet(mel_pred)
+        # Generate frames in chunks
+        num_generated = 0
+        chunk_count = 0
+        
+        while num_generated < max_len:
+            # Determine how many frames to generate in this chunk
+            frames_to_generate = min(self.chunk_size, max_len - num_generated)
             
-            # Add positional encoding
-            tgt = self.pos_encoding(tgt)
+            # Generate frames_to_generate frames one at a time within this chunk
+            for _ in range(frames_to_generate):
+                # Pass current sequence through prenet
+                tgt = self.prenet(mel_pred)
+                
+                # Add positional encoding
+                tgt = self.pos_encoding(tgt)
+                
+                # Create causal mask for current sequence length
+                current_len = mel_pred.size(1)
+                tgt_mask = self._generate_square_subsequent_mask(current_len).to(Hvar.device)
+                
+                # Pass through decoder
+                decoder_output = self.decoder(
+                    tgt=tgt,
+                    memory=Hvar,
+                    tgt_mask=tgt_mask
+                )
+                
+                # Project to mel dimension and take the last frame
+                next_mel = self.mel_proj(decoder_output[:, -1:, :])
+                
+                # Append to sequence
+                mel_pred = torch.cat([mel_pred, next_mel], dim=1)
             
-            # Create causal mask
-            tgt_mask = self._generate_square_subsequent_mask(t + 1).to(Hvar.device)
+            print(f"[PNCAARDecoder] Chunk {chunk_count}: Generated {frames_to_generate} frames, current shape: {mel_pred.shape}")
             
-            # Pass through decoder
-            decoder_output = self.decoder(
-                tgt=tgt,
-                memory=Hvar,
-                tgt_mask=tgt_mask
-            )
-            
-            # Project to mel dimension
-            next_mel = self.mel_proj(decoder_output[:, -1:, :])  # Take last frame
-            
-            # Append to sequence
-            mel_pred = torch.cat([mel_pred, next_mel], dim=1)
+            num_generated += frames_to_generate
+            chunk_count += 1
         
         # Remove the initial zero frame
         mel_pred = mel_pred[:, 1:, :]
         
-        print(f"[PNCAARDecoder] Output mel_pred shape: {mel_pred.shape}")
+        print(f"[PNCAARDecoder] Final output mel_pred shape: {mel_pred.shape}")
+        print(f"[PNCAARDecoder] Total chunks generated: {chunk_count}")
         
         return mel_pred
     
