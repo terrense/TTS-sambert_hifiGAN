@@ -179,7 +179,12 @@
   - Return mel_pred and predictions dict
   - _Requirements: 2.1, 3.1, 8.1, 9.1_
 
-- [ ] 14. Implement acoustic model loss functions
+- [x] 14. Implement acoustic model loss functions
+
+
+
+
+
   - Create models/losses.py with AcousticLoss class
   - Implement L_mel = L1(mel_pred, mel_gt)
   - Implement L_dur = MSE(log_dur_pred, log(dur_gt+1))
