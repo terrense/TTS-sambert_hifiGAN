@@ -579,3 +579,213 @@ class EnergyPredictor(nn.Module):
         print(f"[EnergyPredictor] Output Ee shape: {Ee.shape}")
         
         return energy_tok, energy_frm, Ee
+
+
+
+class VarianceAdaptor(nn.Module):
+    """
+    Variance Adaptor integrating duration, pitch, and energy prediction.
+    
+    This module combines all variance predictors (duration, pitch, energy) and
+    the length regulator to transform phoneme-level features into frame-level
+    features with prosodic information.
+    
+    The Variance Adaptor is a key component in the SAM-BERT acoustic model,
+    responsible for:
+        1. Predicting duration for each phoneme
+        2. Expanding phoneme-level features to frame-level using Length Regulator
+        3. Predicting and embedding pitch information
+        4. Predicting and embedding energy information
+        5. Combining all features: Hvar = Hlr + Ep + Ee
+    
+    Architecture Flow:
+        Henc [B, Tph, d] 
+            ↓
+        Duration Predictor → log_dur_pred [B, Tph]
+            ↓
+        Length Regulator → Hlr [B, Tfrm, d]
+            ↓
+        Pitch Predictor → Ep [B, Tfrm, d]
+            ↓
+        Energy Predictor → Ee [B, Tfrm, d]
+            ↓
+        Hvar = Hlr + Ep + Ee [B, Tfrm, d]
+    
+    Args:
+        d_model (int): Hidden dimension size
+        n_layers (int): Number of convolutional layers in predictors (default: 2)
+        kernel_size (int): Convolution kernel size (default: 3)
+        dropout (float): Dropout rate (default: 0.1)
+        pitch_bins (int): Number of pitch quantization bins (default: 256)
+        pitch_min (float): Minimum pitch value in Hz (default: 80.0)
+        pitch_max (float): Maximum pitch value in Hz (default: 600.0)
+        energy_bins (int): Number of energy quantization bins (default: 256)
+        energy_min (float): Minimum energy value (default: 0.0)
+        energy_max (float): Maximum energy value (default: 1.0)
+    
+    Shape:
+        - Input Henc: [B, Tph, d_model] phoneme-level encoder output
+        - Output Hvar: [B, Tfrm, d_model] frame-level features with prosody
+        - Output predictions: dict containing all intermediate predictions
+    
+    References:
+        - FastSpeech 2: Fast and High-Quality End-to-End Text to Speech (Ren et al., 2020)
+        - SAM-BERT: Speech Acoustic Model with BERT (various implementations)
+    """
+    
+    def __init__(self, d_model, n_layers=2, kernel_size=3, dropout=0.1,
+                 pitch_bins=256, pitch_min=80.0, pitch_max=600.0,
+                 energy_bins=256, energy_min=0.0, energy_max=1.0):
+        super(VarianceAdaptor, self).__init__()
+        
+        self.d_model = d_model
+        
+        # Duration Predictor
+        self.duration_predictor = DurationPredictor(
+            d_model=d_model,
+            n_layers=n_layers,
+            kernel_size=kernel_size,
+            dropout=dropout
+        )
+        
+        # Length Regulator
+        self.length_regulator = LengthRegulator()
+        
+        # Pitch Predictor
+        self.pitch_predictor = PitchPredictor(
+            d_model=d_model,
+            n_bins=pitch_bins,
+            pitch_min=pitch_min,
+            pitch_max=pitch_max,
+            n_layers=n_layers,
+            kernel_size=kernel_size,
+            dropout=dropout
+        )
+        
+        # Energy Predictor
+        self.energy_predictor = EnergyPredictor(
+            d_model=d_model,
+            n_bins=energy_bins,
+            energy_min=energy_min,
+            energy_max=energy_max,
+            n_layers=n_layers,
+            kernel_size=kernel_size,
+            dropout=dropout
+        )
+    
+    def forward(self, Henc, dur_gt=None, pitch_gt=None, energy_gt=None):
+        """
+        Forward pass of Variance Adaptor.
+        
+        This method orchestrates the complete variance adaptation pipeline:
+        1. Predict duration at phoneme level
+        2. Expand phoneme-level features to frame-level using duration
+        3. Predict and embed pitch at frame level
+        4. Predict and embed energy at frame level
+        5. Combine all features through addition
+        
+        Training mode (ground truth provided):
+            - Uses dur_gt for length regulation (teacher forcing)
+            - Uses pitch_gt and energy_gt for embedding (teacher forcing)
+            - Returns all predictions for loss computation
+        
+        Inference mode (ground truth not provided):
+            - Uses predicted duration (converted from log-space and rounded)
+            - Uses predicted pitch and energy for embedding
+            - Returns predictions for acoustic model
+        
+        Args:
+            Henc (torch.FloatTensor): Encoder output [B, Tph, d_model]
+                Phoneme-level features from BERT Encoder
+            dur_gt (torch.LongTensor, optional): Ground truth duration [B, Tph]
+                Duration in frames for each phoneme (training only)
+            pitch_gt (torch.FloatTensor, optional): Ground truth pitch [B, Tfrm]
+                Frame-level pitch values in Hz (training only)
+            energy_gt (torch.FloatTensor, optional): Ground truth energy [B, Tfrm]
+                Frame-level energy values (training only)
+        
+        Returns:
+            Hvar (torch.FloatTensor): Frame-level features [B, Tfrm, d_model]
+                Combined features: Hvar = Hlr + Ep + Ee
+            predictions (dict): Dictionary containing all predictions:
+                - 'log_dur_pred': [B, Tph] log-duration predictions
+                - 'dur': [B, Tph] duration used for expansion
+                - 'pitch_tok': [B, Tph] phoneme-level pitch predictions
+                - 'pitch_frm': [B, Tfrm] frame-level pitch values
+                - 'energy_tok': [B, Tph] phoneme-level energy predictions
+                - 'energy_frm': [B, Tfrm] frame-level energy values
+        
+        Example:
+            >>> variance_adaptor = VarianceAdaptor(d_model=256)
+            >>> Henc = torch.randn(2, 20, 256)  # 2 samples, 20 phonemes
+            >>> dur_gt = torch.randint(1, 10, (2, 20))  # Ground truth durations
+            >>> Hvar, preds = variance_adaptor(Henc, dur_gt=dur_gt)
+            >>> print(Hvar.shape)  # [2, Tfrm, 256] where Tfrm = sum(dur_gt)
+        """
+        # Shape logging
+        print(f"[VarianceAdaptor] Input Henc shape: {Henc.shape}")
+        if dur_gt is not None:
+            print(f"[VarianceAdaptor] Input dur_gt shape: {dur_gt.shape}")
+        if pitch_gt is not None:
+            print(f"[VarianceAdaptor] Input pitch_gt shape: {pitch_gt.shape}")
+        if energy_gt is not None:
+            print(f"[VarianceAdaptor] Input energy_gt shape: {energy_gt.shape}")
+        
+        # ==================== Step 1: Duration Prediction ====================
+        # Predict log-duration for each phoneme
+        log_dur_pred = self.duration_predictor(Henc)  # [B, Tph]
+        
+        # Determine which duration to use for length regulation
+        if dur_gt is not None:
+            # Training mode: use ground truth duration (teacher forcing)
+            dur = dur_gt
+            print(f"[VarianceAdaptor] Using ground truth duration for length regulation")
+        else:
+            # Inference mode: convert predicted log-duration to actual duration
+            # exp(log_dur) gives duration in frames, then round to nearest integer
+            dur = torch.exp(log_dur_pred).round().long()
+            # Clamp to ensure positive durations (at least 1 frame per phoneme)
+            dur = torch.clamp(dur, min=1)
+            print(f"[VarianceAdaptor] Using predicted duration for length regulation")
+        
+        print(f"[VarianceAdaptor] Duration shape: {dur.shape}")
+        
+        # ==================== Step 2: Length Regulation ====================
+        # Expand phoneme-level features to frame-level
+        Hlr = self.length_regulator(Henc, dur)  # [B, Tfrm, d_model]
+        print(f"[VarianceAdaptor] Length-regulated Hlr shape: {Hlr.shape}")
+        
+        # ==================== Step 3: Pitch Prediction ====================
+        # Predict pitch and get pitch embeddings
+        pitch_tok, pitch_frm, Ep = self.pitch_predictor(Henc, dur, pitch_gt)
+        # pitch_tok: [B, Tph] phoneme-level predictions
+        # pitch_frm: [B, Tfrm] frame-level values
+        # Ep: [B, Tfrm, d_model] pitch embeddings
+        print(f"[VarianceAdaptor] Pitch embedding Ep shape: {Ep.shape}")
+        
+        # ==================== Step 4: Energy Prediction ====================
+        # Predict energy and get energy embeddings
+        energy_tok, energy_frm, Ee = self.energy_predictor(Henc, dur, energy_gt)
+        # energy_tok: [B, Tph] phoneme-level predictions
+        # energy_frm: [B, Tfrm] frame-level values
+        # Ee: [B, Tfrm, d_model] energy embeddings
+        print(f"[VarianceAdaptor] Energy embedding Ee shape: {Ee.shape}")
+        
+        # ==================== Step 5: Combine Features ====================
+        # Combine length-regulated features with pitch and energy embeddings
+        # This is element-wise addition of three tensors
+        Hvar = Hlr + Ep + Ee  # [B, Tfrm, d_model]
+        print(f"[VarianceAdaptor] Output Hvar shape: {Hvar.shape}")
+        
+        # ==================== Prepare Output Dictionary ====================
+        # Collect all predictions for loss computation and monitoring
+        predictions = {
+            'log_dur_pred': log_dur_pred,  # [B, Tph]
+            'dur': dur,                     # [B, Tph]
+            'pitch_tok': pitch_tok,         # [B, Tph]
+            'pitch_frm': pitch_frm,         # [B, Tfrm]
+            'energy_tok': energy_tok,       # [B, Tph]
+            'energy_frm': energy_frm        # [B, Tfrm]
+        }
+        
+        return Hvar, predictions

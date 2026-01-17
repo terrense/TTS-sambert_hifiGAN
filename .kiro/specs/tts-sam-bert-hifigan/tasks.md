@@ -119,7 +119,12 @@
   - Add shape logging
   - _Requirements: 7.1, 7.2, 7.3, 7.4_
 
-- [ ] 10. Integrate Variance Adaptor
+- [x] 10. Integrate Variance Adaptor
+
+
+
+
+
   - Add VarianceAdaptor class combining all predictors
   - Implement forward pass: duration prediction -> length regulation -> pitch/energy prediction
   - Compute Hvar = Hlr + Ep + Ee
