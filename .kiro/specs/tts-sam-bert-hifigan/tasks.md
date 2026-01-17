@@ -193,7 +193,12 @@
   - Return total loss and loss_dict with all components
   - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.5, 4.4, 6.5, 7.5_
 
-- [ ] 15. Implement HiFi-GAN Generator
+- [x] 15. Implement HiFi-GAN Generator
+
+
+
+
+
   - Create models/hifigan.py with HiFiGANGenerator class
   - Implement Conv-Pre (1D conv to project mel to hidden dim)
   - Implement Upsample blocks using ConvTranspose1d
