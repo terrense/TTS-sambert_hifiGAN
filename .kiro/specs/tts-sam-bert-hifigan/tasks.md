@@ -132,7 +132,11 @@
   - Add shape logging for Hvar
   - _Requirements: 8.1, 8.2, 8.3_
 
-- [ ] 11. Implement PNCA AR-Decoder with teacher forcing
+- [x] 11. Implement PNCA AR-Decoder with teacher forcing
+
+
+
+
   - Create models/ar_decoder.py with PNCAARDecoder class
   - Implement prenet (Linear -> ReLU -> Dropout -> Linear)
   - Implement multi-layer Transformer Decoder using nn.TransformerDecoderLayer
