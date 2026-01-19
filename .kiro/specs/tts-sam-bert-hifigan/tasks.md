@@ -234,7 +234,12 @@
   - Add shape logging
   - _Requirements: 13.2, 13.3, 13.4_
 
-- [ ] 18. Implement HiFi-GAN loss functions
+- [x] 18. Implement HiFi-GAN loss functions
+
+
+
+
+
   - Add VocoderLoss class to models/losses.py
   - Implement adversarial loss (hinge loss or least squares)
   - Implement feature matching loss between real and fake feature maps

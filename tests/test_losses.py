@@ -12,7 +12,7 @@ import os
 # Add parent directory to path to import models
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from models.losses import AcousticLoss
+from models.losses import AcousticLoss, VocoderLoss
 
 
 class TestAcousticLoss:
@@ -373,6 +373,205 @@ class TestAcousticLoss:
         assert loss.item() >= 0
         assert not torch.isnan(loss)
         assert not torch.isinf(loss)
+
+
+class TestVocoderLoss:
+    """Test suite for VocoderLoss."""
+    
+    @pytest.fixture
+    def loss_fn(self):
+        """Create a VocoderLoss instance for testing."""
+        return VocoderLoss(
+            feature_matching_weight=2.0,
+            mel_weight=45.0,
+            use_mel_loss=True,
+            stft_loss_weight=1.0
+        )
+    
+    def test_loss_initialization(self, loss_fn):
+        """Test that VocoderLoss initializes correctly."""
+        assert loss_fn.feature_matching_weight == 2.0
+        assert loss_fn.mel_weight == 45.0
+        assert loss_fn.use_mel_loss == True
+        assert loss_fn.stft_loss_weight == 1.0
+    
+    def test_compute_discriminator_loss(self, loss_fn):
+        """Test discriminator loss computation."""
+        batch_size = 2
+        num_discriminators = 8  # 3 MSD + 5 MPD
+        
+        # Create fake discriminator outputs
+        disc_real_outputs = [torch.randn(batch_size, 1, 100) for _ in range(num_discriminators)]
+        disc_fake_outputs = [torch.randn(batch_size, 1, 100) for _ in range(num_discriminators)]
+        
+        loss = loss_fn.compute_discriminator_loss(disc_real_outputs, disc_fake_outputs)
+        
+        # Check that loss is a scalar
+        assert loss.dim() == 0
+        # Check that loss is positive
+        assert loss.item() >= 0
+    
+    def test_compute_generator_adversarial_loss(self, loss_fn):
+        """Test generator adversarial loss computation."""
+        batch_size = 2
+        num_discriminators = 8
+        
+        disc_fake_outputs = [torch.randn(batch_size, 1, 100) for _ in range(num_discriminators)]
+        
+        loss = loss_fn.compute_generator_adversarial_loss(disc_fake_outputs)
+        
+        # Check that loss is a scalar
+        assert loss.dim() == 0
+        # Check that loss is positive
+        assert loss.item() >= 0
+    
+    def test_compute_feature_matching_loss(self, loss_fn):
+        """Test feature matching loss computation."""
+        batch_size = 2
+        num_discriminators = 8
+        num_layers = 5
+        
+        # Create fake feature maps
+        real_feature_maps = [
+            [torch.randn(batch_size, 128 * (i+1), 100) for i in range(num_layers)]
+            for _ in range(num_discriminators)
+        ]
+        fake_feature_maps = [
+            [torch.randn(batch_size, 128 * (i+1), 100) for i in range(num_layers)]
+            for _ in range(num_discriminators)
+        ]
+        
+        loss = loss_fn.compute_feature_matching_loss(real_feature_maps, fake_feature_maps)
+        
+        # Check that loss is a scalar
+        assert loss.dim() == 0
+        # Check that loss is positive
+        assert loss.item() >= 0
+    
+    def test_compute_stft_loss(self, loss_fn):
+        """Test multi-resolution STFT loss computation."""
+        batch_size = 2
+        T = 22050  # 1 second at 22050 Hz
+        
+        wav_real = torch.randn(batch_size, 1, T)
+        wav_fake = torch.randn(batch_size, 1, T)
+        
+        sc_loss, mag_loss = loss_fn.compute_stft_loss(wav_real, wav_fake)
+        
+        # Check that losses are scalars
+        assert sc_loss.dim() == 0
+        assert mag_loss.dim() == 0
+        # Check that losses are positive
+        assert sc_loss.item() >= 0
+        assert mag_loss.item() >= 0
+    
+    def test_forward_discriminator(self, loss_fn):
+        """Test discriminator forward pass."""
+        batch_size = 2
+        num_discriminators = 8
+        
+        disc_real_outputs = [torch.randn(batch_size, 1, 100) for _ in range(num_discriminators)]
+        disc_fake_outputs = [torch.randn(batch_size, 1, 100) for _ in range(num_discriminators)]
+        
+        loss, loss_dict = loss_fn.forward_discriminator(disc_real_outputs, disc_fake_outputs)
+        
+        # Check that loss is a scalar
+        assert loss.dim() == 0
+        assert loss.item() >= 0
+        
+        # Check loss dictionary
+        assert 'disc_loss' in loss_dict
+        assert loss_dict['disc_loss'] >= 0
+    
+    def test_forward_generator(self, loss_fn):
+        """Test generator forward pass."""
+        batch_size = 2
+        T = 22050
+        num_discriminators = 8
+        num_layers = 5
+        
+        wav_real = torch.randn(batch_size, 1, T)
+        wav_fake = torch.randn(batch_size, 1, T)
+        disc_fake_outputs = [torch.randn(batch_size, 1, 100) for _ in range(num_discriminators)]
+        real_feature_maps = [
+            [torch.randn(batch_size, 128 * (i+1), 100) for i in range(num_layers)]
+            for _ in range(num_discriminators)
+        ]
+        fake_feature_maps = [
+            [torch.randn(batch_size, 128 * (i+1), 100) for i in range(num_layers)]
+            for _ in range(num_discriminators)
+        ]
+        
+        loss, loss_dict = loss_fn.forward_generator(
+            wav_real, wav_fake, disc_fake_outputs, real_feature_maps, fake_feature_maps
+        )
+        
+        # Check that loss is a scalar
+        assert loss.dim() == 0
+        assert loss.item() >= 0
+        
+        # Check loss dictionary
+        assert 'gen_loss' in loss_dict
+        assert 'gen_adv_loss' in loss_dict
+        assert 'gen_fm_loss' in loss_dict
+        assert 'gen_sc_loss' in loss_dict
+        assert 'gen_mag_loss' in loss_dict
+        assert 'gen_stft_loss' in loss_dict
+        
+        # Check that all losses are positive
+        assert loss_dict['gen_loss'] >= 0
+        assert loss_dict['gen_adv_loss'] >= 0
+        assert loss_dict['gen_fm_loss'] >= 0
+        assert loss_dict['gen_sc_loss'] >= 0
+        assert loss_dict['gen_mag_loss'] >= 0
+    
+    def test_loss_backward_discriminator(self, loss_fn):
+        """Test that discriminator loss can be backpropagated."""
+        batch_size = 1
+        num_discriminators = 8
+        
+        disc_real_outputs = [torch.randn(batch_size, 1, 100, requires_grad=True) for _ in range(num_discriminators)]
+        disc_fake_outputs = [torch.randn(batch_size, 1, 100, requires_grad=True) for _ in range(num_discriminators)]
+        
+        loss, _ = loss_fn.forward_discriminator(disc_real_outputs, disc_fake_outputs)
+        
+        # Backpropagate
+        loss.backward()
+        
+        # Check that gradients are computed
+        for output in disc_real_outputs:
+            assert output.grad is not None
+        for output in disc_fake_outputs:
+            assert output.grad is not None
+    
+    def test_loss_backward_generator(self, loss_fn):
+        """Test that generator loss can be backpropagated."""
+        batch_size = 1
+        T = 22050
+        num_discriminators = 8
+        num_layers = 5
+        
+        wav_real = torch.randn(batch_size, 1, T)
+        wav_fake = torch.randn(batch_size, 1, T, requires_grad=True)
+        disc_fake_outputs = [torch.randn(batch_size, 1, 100, requires_grad=True) for _ in range(num_discriminators)]
+        real_feature_maps = [
+            [torch.randn(batch_size, 128 * (i+1), 100) for i in range(num_layers)]
+            for _ in range(num_discriminators)
+        ]
+        fake_feature_maps = [
+            [torch.randn(batch_size, 128 * (i+1), 100, requires_grad=True) for i in range(num_layers)]
+            for _ in range(num_discriminators)
+        ]
+        
+        loss, _ = loss_fn.forward_generator(
+            wav_real, wav_fake, disc_fake_outputs, real_feature_maps, fake_feature_maps
+        )
+        
+        # Backpropagate
+        loss.backward()
+        
+        # Check that gradients are computed
+        assert wav_fake.grad is not None
 
 
 if __name__ == "__main__":
