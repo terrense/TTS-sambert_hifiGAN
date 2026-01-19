@@ -208,7 +208,12 @@
   - Add shape logging
   - _Requirements: 12.1, 12.2, 12.3, 12.4_
 
-- [ ] 16. Implement HiFi-GAN Multi-Scale Discriminator
+- [x] 16. Implement HiFi-GAN Multi-Scale Discriminator
+
+
+
+
+
   - Add MultiScaleDiscriminator class to models/hifigan.py
   - Implement 3 discriminators with different downsampling rates (1x, 2x, 4x)
   - Use AvgPool1d for downsampling
@@ -216,7 +221,12 @@
   - Add shape logging
   - _Requirements: 13.1, 13.3, 13.4_
 
-- [ ] 17. Implement HiFi-GAN Multi-Period Discriminator
+- [x] 17. Implement HiFi-GAN Multi-Period Discriminator
+
+
+
+
+
   - Add MultiPeriodDiscriminator class to models/hifigan.py
   - Implement discriminators for periods [2, 3, 5, 7, 11]
   - Reshape waveform based on period before processing

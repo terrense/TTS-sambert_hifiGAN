@@ -281,3 +281,335 @@ class HiFiGANGenerator(nn.Module):
                     nn.utils.weight_norm(conv)
                 for conv in resblock.convs2:
                     nn.utils.weight_norm(conv)
+
+
+class ScaleDiscriminator(nn.Module):
+    """
+    Single-scale discriminator for HiFi-GAN.
+    
+    Processes waveform at a specific scale using strided convolutions.
+    Returns both discriminator output and intermediate feature maps for feature matching loss.
+    """
+    
+    def __init__(
+        self,
+        use_spectral_norm: bool = False,
+        debug_shapes: bool = False
+    ):
+        """
+        Args:
+            use_spectral_norm: Whether to use spectral normalization
+            debug_shapes: Whether to print tensor shapes during forward pass
+        """
+        super().__init__()
+        self.debug_shapes = debug_shapes or os.getenv("DEBUG_SHAPES", "0") == "1"
+        
+        norm_f = nn.utils.spectral_norm if use_spectral_norm else nn.utils.weight_norm
+        
+        # Discriminator layers with increasing channels and strided convolutions
+        self.convs = nn.ModuleList([
+            norm_f(nn.Conv1d(1, 128, kernel_size=15, stride=1, padding=7)),
+            norm_f(nn.Conv1d(128, 128, kernel_size=41, stride=2, groups=4, padding=20)),
+            norm_f(nn.Conv1d(128, 256, kernel_size=41, stride=2, groups=16, padding=20)),
+            norm_f(nn.Conv1d(256, 512, kernel_size=41, stride=4, groups=16, padding=20)),
+            norm_f(nn.Conv1d(512, 1024, kernel_size=41, stride=4, groups=16, padding=20)),
+            norm_f(nn.Conv1d(1024, 1024, kernel_size=41, stride=1, groups=16, padding=20)),
+            norm_f(nn.Conv1d(1024, 1024, kernel_size=5, stride=1, padding=2)),
+        ])
+        
+        # Final output layer
+        self.conv_post = norm_f(nn.Conv1d(1024, 1, kernel_size=3, stride=1, padding=1))
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        """
+        Args:
+            x: [B, 1, T] waveform
+            
+        Returns:
+            output: [B, 1, T'] discriminator output
+            feature_maps: List of intermediate feature maps for feature matching loss
+        """
+        if self.debug_shapes:
+            print(f"[ScaleDiscriminator] Input shape: {x.shape}")
+        
+        feature_maps = []
+        
+        for i, conv in enumerate(self.convs):
+            x = conv(x)
+            x = F.leaky_relu(x, 0.1)
+            feature_maps.append(x)
+            
+            if self.debug_shapes:
+                print(f"[ScaleDiscriminator] After conv {i}: {x.shape}")
+        
+        # Final output
+        x = self.conv_post(x)
+        feature_maps.append(x)
+        
+        if self.debug_shapes:
+            print(f"[ScaleDiscriminator] Output shape: {x.shape}")
+            print(f"[ScaleDiscriminator] Number of feature maps: {len(feature_maps)}")
+        
+        return x, feature_maps
+
+
+class MultiScaleDiscriminator(nn.Module):
+    """
+    Multi-Scale Discriminator (MSD) for HiFi-GAN.
+    
+    Processes waveforms at multiple scales using average pooling for downsampling.
+    This allows the discriminator to capture both fine-grained and coarse-grained features.
+    
+    Architecture:
+    - 3 discriminators operating at different scales
+    - Scale 0: Original waveform (1x)
+    - Scale 1: 2x downsampled waveform
+    - Scale 2: 4x downsampled waveform
+    
+    Shape Contract:
+        Input: wav [B, 1, T]
+        Output: 
+            - outputs: List of 3 discriminator outputs [B, 1, T']
+            - feature_maps: List of 3 lists of intermediate features
+    """
+    
+    def __init__(
+        self,
+        use_spectral_norm: bool = False,
+        debug_shapes: bool = False
+    ):
+        """
+        Args:
+            use_spectral_norm: Whether to use spectral normalization
+            debug_shapes: Whether to print tensor shapes during forward pass
+        """
+        super().__init__()
+        self.debug_shapes = debug_shapes or os.getenv("DEBUG_SHAPES", "0") == "1"
+        
+        # Create 3 discriminators for different scales
+        self.discriminators = nn.ModuleList([
+            ScaleDiscriminator(use_spectral_norm, debug_shapes),
+            ScaleDiscriminator(use_spectral_norm, debug_shapes),
+            ScaleDiscriminator(use_spectral_norm, debug_shapes)
+        ])
+        
+        # Pooling layers for downsampling
+        # Scale 0: no pooling (1x)
+        # Scale 1: 2x downsampling
+        # Scale 2: 4x downsampling (apply 2x pooling twice)
+        self.poolings = nn.ModuleList([
+            nn.Identity(),  # No downsampling for first discriminator
+            nn.AvgPool1d(kernel_size=4, stride=2, padding=2),  # 2x downsampling
+            nn.AvgPool1d(kernel_size=4, stride=2, padding=2)   # 2x downsampling (applied twice)
+        ])
+    
+    def forward(self, x: torch.Tensor) -> Tuple[List[torch.Tensor], List[List[torch.Tensor]]]:
+        """
+        Process waveform at multiple scales.
+        
+        Args:
+            x: [B, 1, T] waveform
+            
+        Returns:
+            outputs: List of 3 discriminator outputs
+            feature_maps: List of 3 lists of intermediate feature maps
+        """
+        if self.debug_shapes:
+            print(f"[MultiScaleDiscriminator] Input shape: {x.shape}")
+        
+        outputs = []
+        feature_maps_list = []
+        
+        for i, (disc, pool) in enumerate(zip(self.discriminators, self.poolings)):
+            # Apply downsampling
+            if i == 0:
+                # Scale 0: original (1x)
+                x_scaled = pool(x)
+            elif i == 1:
+                # Scale 1: 2x downsampling
+                x_scaled = pool(x)
+            else:
+                # Scale 2: 4x downsampling (apply 2x pooling twice)
+                x_scaled = self.poolings[1](x)  # First 2x
+                x_scaled = self.poolings[2](x_scaled)  # Second 2x
+            
+            if self.debug_shapes:
+                print(f"[MultiScaleDiscriminator] Scale {i} input shape: {x_scaled.shape}")
+            
+            # Process with discriminator
+            output, feature_maps = disc(x_scaled)
+            outputs.append(output)
+            feature_maps_list.append(feature_maps)
+            
+            if self.debug_shapes:
+                print(f"[MultiScaleDiscriminator] Scale {i} output shape: {output.shape}")
+        
+        return outputs, feature_maps_list
+
+
+class PeriodDiscriminator(nn.Module):
+    """
+    Single-period discriminator for HiFi-GAN.
+    
+    Processes waveform by reshaping it based on a specific period,
+    allowing the discriminator to capture periodic patterns in the audio.
+    
+    The waveform is reshaped from [B, 1, T] to [B, 1, T//period, period],
+    then processed with 2D convolutions.
+    """
+    
+    def __init__(
+        self,
+        period: int,
+        kernel_size: int = 5,
+        stride: int = 3,
+        use_spectral_norm: bool = False,
+        debug_shapes: bool = False
+    ):
+        """
+        Args:
+            period: Period for reshaping the waveform
+            kernel_size: Kernel size for 2D convolutions
+            stride: Stride for 2D convolutions
+            use_spectral_norm: Whether to use spectral normalization
+            debug_shapes: Whether to print tensor shapes during forward pass
+        """
+        super().__init__()
+        self.period = period
+        self.debug_shapes = debug_shapes or os.getenv("DEBUG_SHAPES", "0") == "1"
+        
+        norm_f = nn.utils.spectral_norm if use_spectral_norm else nn.utils.weight_norm
+        
+        # 2D convolution layers with increasing channels
+        self.convs = nn.ModuleList([
+            norm_f(nn.Conv2d(1, 32, kernel_size=(kernel_size, 1), stride=(stride, 1), padding=(get_padding(kernel_size, 1), 0))),
+            norm_f(nn.Conv2d(32, 128, kernel_size=(kernel_size, 1), stride=(stride, 1), padding=(get_padding(kernel_size, 1), 0))),
+            norm_f(nn.Conv2d(128, 512, kernel_size=(kernel_size, 1), stride=(stride, 1), padding=(get_padding(kernel_size, 1), 0))),
+            norm_f(nn.Conv2d(512, 1024, kernel_size=(kernel_size, 1), stride=(stride, 1), padding=(get_padding(kernel_size, 1), 0))),
+            norm_f(nn.Conv2d(1024, 1024, kernel_size=(kernel_size, 1), stride=1, padding=(2, 0))),
+        ])
+        
+        # Final output layer
+        self.conv_post = norm_f(nn.Conv2d(1024, 1, kernel_size=(3, 1), stride=1, padding=(1, 0)))
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+        """
+        Args:
+            x: [B, 1, T] waveform
+            
+        Returns:
+            output: [B, 1, H, W] discriminator output
+            feature_maps: List of intermediate feature maps for feature matching loss
+        """
+        if self.debug_shapes:
+            print(f"[PeriodDiscriminator-{self.period}] Input shape: {x.shape}")
+        
+        feature_maps = []
+        
+        # Reshape waveform based on period
+        # [B, 1, T] -> [B, 1, T//period, period]
+        batch_size, channels, length = x.shape
+        
+        # Pad if necessary to make length divisible by period
+        if length % self.period != 0:
+            pad_amount = self.period - (length % self.period)
+            x = F.pad(x, (0, pad_amount), mode='reflect')
+            length = x.shape[2]
+        
+        # Reshape: [B, 1, T] -> [B, 1, T//period, period]
+        x = x.view(batch_size, channels, length // self.period, self.period)
+        
+        if self.debug_shapes:
+            print(f"[PeriodDiscriminator-{self.period}] After reshape: {x.shape}")
+        
+        # Process with 2D convolutions
+        for i, conv in enumerate(self.convs):
+            x = conv(x)
+            x = F.leaky_relu(x, 0.1)
+            feature_maps.append(x)
+            
+            if self.debug_shapes:
+                print(f"[PeriodDiscriminator-{self.period}] After conv {i}: {x.shape}")
+        
+        # Final output
+        x = self.conv_post(x)
+        feature_maps.append(x)
+        
+        if self.debug_shapes:
+            print(f"[PeriodDiscriminator-{self.period}] Output shape: {x.shape}")
+            print(f"[PeriodDiscriminator-{self.period}] Number of feature maps: {len(feature_maps)}")
+        
+        return x, feature_maps
+
+
+class MultiPeriodDiscriminator(nn.Module):
+    """
+    Multi-Period Discriminator (MPD) for HiFi-GAN.
+    
+    Processes waveforms using multiple discriminators, each operating on a different period.
+    This allows the discriminator to capture various periodic patterns in the audio signal.
+    
+    Architecture:
+    - 5 discriminators with periods [2, 3, 5, 7, 11]
+    - Each discriminator reshapes the waveform based on its period
+    - Uses 2D convolutions to process the reshaped waveform
+    
+    Shape Contract:
+        Input: wav [B, 1, T]
+        Output: 
+            - outputs: List of 5 discriminator outputs [B, 1, H, W]
+            - feature_maps: List of 5 lists of intermediate features
+    """
+    
+    def __init__(
+        self,
+        periods: List[int] = [2, 3, 5, 7, 11],
+        use_spectral_norm: bool = False,
+        debug_shapes: bool = False
+    ):
+        """
+        Args:
+            periods: List of periods for each discriminator
+            use_spectral_norm: Whether to use spectral normalization
+            debug_shapes: Whether to print tensor shapes during forward pass
+        """
+        super().__init__()
+        self.debug_shapes = debug_shapes or os.getenv("DEBUG_SHAPES", "0") == "1"
+        self.periods = periods
+        
+        # Create discriminators for each period
+        self.discriminators = nn.ModuleList([
+            PeriodDiscriminator(period, use_spectral_norm=use_spectral_norm, debug_shapes=debug_shapes)
+            for period in periods
+        ])
+    
+    def forward(self, x: torch.Tensor) -> Tuple[List[torch.Tensor], List[List[torch.Tensor]]]:
+        """
+        Process waveform with multiple period discriminators.
+        
+        Args:
+            x: [B, 1, T] waveform
+            
+        Returns:
+            outputs: List of 5 discriminator outputs
+            feature_maps: List of 5 lists of intermediate feature maps
+        """
+        if self.debug_shapes:
+            print(f"[MultiPeriodDiscriminator] Input shape: {x.shape}")
+        
+        outputs = []
+        feature_maps_list = []
+        
+        for i, disc in enumerate(self.discriminators):
+            if self.debug_shapes:
+                print(f"[MultiPeriodDiscriminator] Processing period {self.periods[i]}")
+            
+            # Process with period discriminator
+            output, feature_maps = disc(x)
+            outputs.append(output)
+            feature_maps_list.append(feature_maps)
+            
+            if self.debug_shapes:
+                print(f"[MultiPeriodDiscriminator] Period {self.periods[i]} output shape: {output.shape}")
+        
+        return outputs, feature_maps_list
