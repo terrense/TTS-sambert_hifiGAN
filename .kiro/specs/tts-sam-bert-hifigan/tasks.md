@@ -247,7 +247,12 @@
   - Return generator loss, discriminator loss, and loss_dict
   - _Requirements: 14.1, 14.2, 14.3, 14.4_
 
-- [ ] 19. Integrate complete HiFi-GAN model
+- [x] 19. Integrate complete HiFi-GAN model
+
+
+
+
+
   - Add HiFiGAN class to models/hifigan.py
   - Integrate Generator, MSD, and MPD
   - Implement forward() for generation: mel -> wav

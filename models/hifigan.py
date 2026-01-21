@@ -613,3 +613,188 @@ class MultiPeriodDiscriminator(nn.Module):
                 print(f"[MultiPeriodDiscriminator] Period {self.periods[i]} output shape: {output.shape}")
         
         return outputs, feature_maps_list
+
+
+class HiFiGAN(nn.Module):
+    """
+    Complete HiFi-GAN model integrating Generator, Multi-Scale Discriminator (MSD),
+    and Multi-Period Discriminator (MPD).
+    
+    This class provides a unified interface for:
+    1. Generation: Converting mel-spectrograms to waveforms
+    2. Discrimination: Processing real and fake waveforms for adversarial training
+    
+    Architecture:
+    - Generator: Converts mel [B, n_mels, Tfrm] -> wav [B, 1, T_wav]
+    - MSD: 3 discriminators at different scales (1x, 2x, 4x downsampling)
+    - MPD: 5 discriminators with different periods [2, 3, 5, 7, 11]
+    
+    Shape Contract:
+        forward() - Generation:
+            Input: mel [B, n_mels, Tfrm]
+            Output: wav [B, 1, T_wav] where T_wav = Tfrm * hop_length
+            
+        discriminate() - Discrimination:
+            Input: wav_real [B, 1, T], wav_fake [B, 1, T]
+            Output: 
+                - msd_real_outputs: List of 3 discriminator outputs for real audio
+                - msd_real_features: List of 3 lists of feature maps for real audio
+                - msd_fake_outputs: List of 3 discriminator outputs for fake audio
+                - msd_fake_features: List of 3 lists of feature maps for fake audio
+                - mpd_real_outputs: List of 5 discriminator outputs for real audio
+                - mpd_real_features: List of 5 lists of feature maps for real audio
+                - mpd_fake_outputs: List of 5 discriminator outputs for fake audio
+                - mpd_fake_features: List of 5 lists of feature maps for fake audio
+    """
+    
+    def __init__(
+        self,
+        n_mels: int = 80,
+        upsample_rates: List[int] = [8, 8, 2, 2],
+        upsample_kernel_sizes: List[int] = [16, 16, 4, 4],
+        upsample_initial_channel: int = 512,
+        resblock_kernel_sizes: List[int] = [3, 7, 11],
+        resblock_dilation_sizes: List[List[int]] = [[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+        msd_use_spectral_norm: bool = False,
+        mpd_periods: List[int] = [2, 3, 5, 7, 11],
+        mpd_use_spectral_norm: bool = False,
+        debug_shapes: bool = False
+    ):
+        """
+        Args:
+            n_mels: Number of mel bins
+            upsample_rates: Upsampling rates for generator
+            upsample_kernel_sizes: Kernel sizes for upsampling layers
+            upsample_initial_channel: Initial number of channels in generator
+            resblock_kernel_sizes: Kernel sizes for residual blocks in MRF
+            resblock_dilation_sizes: Dilation configurations for residual blocks
+            msd_use_spectral_norm: Whether to use spectral norm in MSD
+            mpd_periods: List of periods for MPD
+            mpd_use_spectral_norm: Whether to use spectral norm in MPD
+            debug_shapes: Whether to print tensor shapes during forward pass
+        """
+        super().__init__()
+        
+        self.debug_shapes = debug_shapes or os.getenv("DEBUG_SHAPES", "0") == "1"
+        
+        # Generator: mel -> wav
+        self.generator = HiFiGANGenerator(
+            n_mels=n_mels,
+            upsample_rates=upsample_rates,
+            upsample_kernel_sizes=upsample_kernel_sizes,
+            upsample_initial_channel=upsample_initial_channel,
+            resblock_kernel_sizes=resblock_kernel_sizes,
+            resblock_dilation_sizes=resblock_dilation_sizes,
+            debug_shapes=debug_shapes
+        )
+        
+        # Multi-Scale Discriminator
+        self.msd = MultiScaleDiscriminator(
+            use_spectral_norm=msd_use_spectral_norm,
+            debug_shapes=debug_shapes
+        )
+        
+        # Multi-Period Discriminator
+        self.mpd = MultiPeriodDiscriminator(
+            periods=mpd_periods,
+            use_spectral_norm=mpd_use_spectral_norm,
+            debug_shapes=debug_shapes
+        )
+    
+    def forward(self, mel: torch.Tensor) -> torch.Tensor:
+        """
+        Generate waveform from mel-spectrogram.
+        
+        This is the main generation interface used during inference.
+        
+        Args:
+            mel: [B, n_mels, Tfrm] mel-spectrogram
+            
+        Returns:
+            wav: [B, 1, T_wav] generated waveform where T_wav = Tfrm * hop_length
+        """
+        if self.debug_shapes:
+            print(f"[HiFiGAN] forward() - Input mel shape: {mel.shape}")
+        
+        wav = self.generator(mel)
+        
+        if self.debug_shapes:
+            print(f"[HiFiGAN] forward() - Output wav shape: {wav.shape}")
+        
+        return wav
+    
+    def discriminate(
+        self,
+        wav_real: torch.Tensor,
+        wav_fake: torch.Tensor
+    ) -> Tuple[
+        List[torch.Tensor], List[List[torch.Tensor]],
+        List[torch.Tensor], List[List[torch.Tensor]],
+        List[torch.Tensor], List[List[torch.Tensor]],
+        List[torch.Tensor], List[List[torch.Tensor]]
+    ]:
+        """
+        Process real and fake waveforms through both discriminators.
+        
+        This method is used during training to compute discriminator outputs
+        and intermediate feature maps for adversarial loss and feature matching loss.
+        
+        Args:
+            wav_real: [B, 1, T] real waveform from dataset
+            wav_fake: [B, 1, T] generated waveform from generator
+            
+        Returns:
+            Tuple of 8 elements:
+                - msd_real_outputs: List of 3 discriminator outputs for real audio
+                - msd_real_features: List of 3 lists of feature maps for real audio
+                - msd_fake_outputs: List of 3 discriminator outputs for fake audio
+                - msd_fake_features: List of 3 lists of feature maps for fake audio
+                - mpd_real_outputs: List of 5 discriminator outputs for real audio
+                - mpd_real_features: List of 5 lists of feature maps for real audio
+                - mpd_fake_outputs: List of 5 discriminator outputs for fake audio
+                - mpd_fake_features: List of 5 lists of feature maps for fake audio
+        """
+        if self.debug_shapes:
+            print(f"[HiFiGAN] discriminate() - Real wav shape: {wav_real.shape}")
+            print(f"[HiFiGAN] discriminate() - Fake wav shape: {wav_fake.shape}")
+        
+        # Multi-Scale Discriminator
+        if self.debug_shapes:
+            print(f"[HiFiGAN] Processing MSD...")
+        
+        msd_real_outputs, msd_real_features = self.msd(wav_real)
+        msd_fake_outputs, msd_fake_features = self.msd(wav_fake)
+        
+        if self.debug_shapes:
+            print(f"[HiFiGAN] MSD - Real outputs: {len(msd_real_outputs)} discriminators")
+            print(f"[HiFiGAN] MSD - Fake outputs: {len(msd_fake_outputs)} discriminators")
+        
+        # Multi-Period Discriminator
+        if self.debug_shapes:
+            print(f"[HiFiGAN] Processing MPD...")
+        
+        mpd_real_outputs, mpd_real_features = self.mpd(wav_real)
+        mpd_fake_outputs, mpd_fake_features = self.mpd(wav_fake)
+        
+        if self.debug_shapes:
+            print(f"[HiFiGAN] MPD - Real outputs: {len(mpd_real_outputs)} discriminators")
+            print(f"[HiFiGAN] MPD - Fake outputs: {len(mpd_fake_outputs)} discriminators")
+        
+        return (
+            msd_real_outputs, msd_real_features,
+            msd_fake_outputs, msd_fake_features,
+            mpd_real_outputs, mpd_real_features,
+            mpd_fake_outputs, mpd_fake_features
+        )
+    
+    def generate(self, mel: torch.Tensor) -> torch.Tensor:
+        """
+        Alias for forward() method for clarity.
+        
+        Args:
+            mel: [B, n_mels, Tfrm] mel-spectrogram
+            
+        Returns:
+            wav: [B, 1, T_wav] generated waveform
+        """
+        return self.forward(mel)

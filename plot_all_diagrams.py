@@ -132,14 +132,18 @@ def main():
     panels.append(("waveform_mono", panel_waveform_mono))
 
     def panel_stft_mag(ax):
+        vmax = np.percentile(S_mag, 99)  # 关键：避免被极端峰值压黑
         img = librosa.display.specshow(
             S_mag, sr=sr, hop_length=args.hop_length,
-            x_axis="time", y_axis="linear", ax=ax
+            x_axis="time", y_axis="linear", ax=ax,
+            vmin=0, vmax=vmax
         )
-        ax.set_title("STFT Magnitude Spectrogram (linear freq, not log)")
+        ax.set_title("STFT Magnitude Spectrogram (linear) [clipped for visibility]")
+        ax.set_ylim(0, 8000)  # 可选：语音更好读
         plt.colorbar(img, ax=ax, format="%.2f")
 
-    panels.append(("stft_mag", panel_stft_mag))
+
+
 
     def panel_stft_db(ax):
         img = librosa.display.specshow(
@@ -163,14 +167,15 @@ def main():
 
     if not args.skip_mel_power:
         def panel_mel_power(ax):
+            vmax = np.percentile(S_mel, 99)
             img = librosa.display.specshow(
                 S_mel, sr=sr, hop_length=args.hop_length,
                 x_axis="time", y_axis="mel",
-                fmin=args.fmin, fmax=fmax, ax=ax
+                fmin=args.fmin, fmax=min(fmax, 8000), ax=ax,  # 可选
+                vmin=0, vmax=vmax
             )
-            ax.set_title("Mel Spectrogram (power)")
+            ax.set_title("Mel Spectrogram (power) [clipped for visibility]")
             plt.colorbar(img, ax=ax, format="%.2f")
-        panels.append(("mel_power", panel_mel_power))
 
     def panel_mel_db(ax):
         img = librosa.display.specshow(
