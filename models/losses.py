@@ -425,14 +425,20 @@ class VocoderLoss(nn.Module):
         This encourages the discriminator to output 1 for real samples
         and 0 for fake samples.
         
+        Aggregation Strategy:
+        - Computes loss for each sub-discriminator (MSD has 3, MPD has 5)
+        - Aggregates using MEAN across all sub-discriminators
+        - This ensures balanced contribution from MSD and MPD regardless of their counts
+        
         Args:
             disc_real_outputs (List[torch.Tensor]): List of discriminator outputs for real audio
                 Each element is [B, 1, T'] or [B, 1, H, W] for period discriminators
+                Expected: 8 outputs total (3 from MSD + 5 from MPD)
             disc_fake_outputs (List[torch.Tensor]): List of discriminator outputs for fake audio
                 Same structure as disc_real_outputs
         
         Returns:
-            torch.FloatTensor: Scalar discriminator loss
+            torch.FloatTensor: Scalar discriminator loss (averaged over all sub-discriminators)
         
         Example:
             >>> loss_fn = VocoderLoss()
@@ -442,6 +448,7 @@ class VocoderLoss(nn.Module):
             >>> loss = loss_fn.compute_discriminator_loss(disc_real, disc_fake)
         """
         loss = 0.0
+        num_discriminators = len(disc_real_outputs)
         
         for dr, df in zip(disc_real_outputs, disc_fake_outputs):
             # Real loss: (D(x_real) - 1)^2
@@ -451,6 +458,10 @@ class VocoderLoss(nn.Module):
             fake_loss = torch.mean(df ** 2)
             
             loss += real_loss + fake_loss
+        
+        # Average over all sub-discriminators (mean aggregation)
+        # This ensures balanced contribution from MSD (3 discriminators) and MPD (5 discriminators)
+        loss = loss / num_discriminators
         
         return loss
     
@@ -467,12 +478,18 @@ class VocoderLoss(nn.Module):
         This encourages the generator to produce samples that the discriminator
         classifies as real (output close to 1).
         
+        Aggregation Strategy:
+        - Computes loss for each sub-discriminator (MSD has 3, MPD has 5)
+        - Aggregates using MEAN across all sub-discriminators
+        - This ensures balanced contribution from MSD and MPD regardless of their counts
+        
         Args:
             disc_fake_outputs (List[torch.Tensor]): List of discriminator outputs for fake audio
                 Each element is [B, 1, T'] or [B, 1, H, W] for period discriminators
+                Expected: 8 outputs total (3 from MSD + 5 from MPD)
         
         Returns:
-            torch.FloatTensor: Scalar generator adversarial loss
+            torch.FloatTensor: Scalar generator adversarial loss (averaged over all sub-discriminators)
         
         Example:
             >>> loss_fn = VocoderLoss()
@@ -480,10 +497,15 @@ class VocoderLoss(nn.Module):
             >>> loss = loss_fn.compute_generator_adversarial_loss(disc_fake)
         """
         loss = 0.0
+        num_discriminators = len(disc_fake_outputs)
         
         for df in disc_fake_outputs:
             # Generator loss: (D(G(z)) - 1)^2
             loss += torch.mean((df - 1.0) ** 2)
+        
+        # Average over all sub-discriminators (mean aggregation)
+        # This ensures balanced contribution from MSD (3 discriminators) and MPD (5 discriminators)
+        loss = loss / num_discriminators
         
         return loss
     
@@ -503,17 +525,25 @@ class VocoderLoss(nn.Module):
         
         where D_i represents the i-th layer features of the discriminator.
         
-        This implementation:
-        1. Iterates over all discriminators (MSD + MPD)
-        2. For each discriminator, iterates over all layers
-        3. Computes L1 distance between real and fake feature maps
-        4. Detaches real features to prevent backprop into discriminator
-        5. Aggregates loss across all sub-discriminators using mean
-        6. Optionally returns per-discriminator loss contributions for logging
+        Aggregation Strategy:
+        - Iterates over all sub-discriminators (MSD has 3, MPD has 5)
+        - For each discriminator, computes L1 distance across all layers
+        - Averages loss over layers within each discriminator
+        - Aggregates across all sub-discriminators using MEAN
+        - This ensures balanced contribution from MSD and MPD regardless of their counts
+        - Detaches real features to prevent backprop into discriminator
+        
+        Implementation Details:
+        1. Outer loop: iterate over discriminators (8 total: 3 MSD + 5 MPD)
+        2. Inner loop: iterate over layers within each discriminator
+        3. Compute L1 distance between real and fake feature maps at each layer
+        4. Average over layers within each discriminator
+        5. Average over all discriminators (mean aggregation)
+        6. Optionally return per-discriminator losses for logging
         
         Args:
             real_feature_maps (List[List[torch.Tensor]]): Feature maps from real audio
-                Outer list: one per discriminator (MSD + MPD)
+                Outer list: one per discriminator (8 total: 3 MSD + 5 MPD)
                 Inner list: one per layer in that discriminator
             fake_feature_maps (List[List[torch.Tensor]]): Feature maps from fake audio
                 Same structure as real_feature_maps
@@ -521,7 +551,7 @@ class VocoderLoss(nn.Module):
                 for logging purposes (default: False)
         
         Returns:
-            loss (torch.FloatTensor): Scalar feature matching loss (averaged over all layers)
+            loss (torch.FloatTensor): Scalar feature matching loss (averaged over all layers and discriminators)
             per_disc_losses (Optional[List[float]]): Per-discriminator loss contributions
                 Only returned if return_per_discriminator=True, otherwise None
         
@@ -539,10 +569,12 @@ class VocoderLoss(nn.Module):
         """
         total_loss = 0.0
         per_discriminator_losses = [] if return_per_discriminator else None
+        num_discriminators = len(real_feature_maps)
         
-        # Iterate over discriminators
+        # Iterate over discriminators (8 total: 3 MSD + 5 MPD)
         for disc_idx, (real_fmap_list, fake_fmap_list) in enumerate(zip(real_feature_maps, fake_feature_maps)):
             disc_loss = 0.0
+            num_layers = len(real_fmap_list)
             
             # Iterate over layers within each discriminator
             for real_fmap, fake_fmap in zip(real_fmap_list, fake_fmap_list):
@@ -552,15 +584,15 @@ class VocoderLoss(nn.Module):
                 disc_loss += layer_loss
             
             # Average over layers in this discriminator
-            disc_loss = disc_loss / len(real_fmap_list)
+            disc_loss = disc_loss / num_layers
             total_loss += disc_loss
             
             # Store per-discriminator loss for logging
             if return_per_discriminator:
                 per_discriminator_losses.append(disc_loss.item())
         
-        # Average over all discriminators
-        num_discriminators = len(real_feature_maps)
+        # Average over all discriminators (mean aggregation)
+        # This ensures balanced contribution from MSD (3 discriminators) and MPD (5 discriminators)
         total_loss = total_loss / num_discriminators
         
         return total_loss, per_discriminator_losses
@@ -791,23 +823,33 @@ class VocoderLoss(nn.Module):
         
         L_gen = L_adv + λ_fm * L_fm + λ_mel * L_mel + λ_stft * (L_sc + L_mag)
         
+        Loss Aggregation Strategy:
+        - L_adv: Averaged over all sub-discriminators (3 MSD + 5 MPD = 8 total)
+        - L_fm: Averaged over all sub-discriminators and their layers
+        - L_mel: Single loss computed from mel reconstruction
+        - L_stft: Sum of spectral convergence and log magnitude losses
+        
         Args:
             wav_real (torch.Tensor): Real waveform [B, 1, T]
             wav_fake (torch.Tensor): Generated waveform [B, 1, T]
             disc_fake_outputs (List[torch.Tensor]): Discriminator outputs for fake audio
+                Expected: 8 outputs (3 from MSD + 5 from MPD)
             real_feature_maps (List[List[torch.Tensor]]): Feature maps from real audio
+                Expected: 8 lists (3 from MSD + 5 from MPD), each with multiple layers
             fake_feature_maps (List[List[torch.Tensor]]): Feature maps from fake audio
+                Same structure as real_feature_maps
         
         Returns:
             loss (torch.FloatTensor): Total generator loss
             loss_dict (dict): Dictionary containing loss components:
                 - 'gen_loss': Total generator loss
-                - 'gen_adv_loss': Adversarial loss
-                - 'gen_fm_loss': Feature matching loss
+                - 'gen_adv_loss': Adversarial loss (L_adv)
+                - 'gen_fm_loss': Feature matching loss (L_fm)
+                - 'gen_mel_loss': Mel reconstruction loss (L_mel)
                 - 'gen_fm_loss_disc_N': Per-discriminator FM loss (N = 0, 1, 2, ...)
-                - 'gen_mel_loss': Mel reconstruction loss (if use_mel_loss=True)
                 - 'gen_sc_loss': Spectral convergence loss (if using STFT loss)
                 - 'gen_mag_loss': Log magnitude loss (if using STFT loss)
+                - 'gen_stft_loss': Total STFT loss
         
         Example:
             >>> loss_fn = VocoderLoss()
@@ -821,15 +863,16 @@ class VocoderLoss(nn.Module):
             ... )
             >>> loss.backward()
         """
-        # Adversarial loss
+        # Adversarial loss (L_adv) - averaged over all sub-discriminators
         adv_loss = self.compute_generator_adversarial_loss(disc_fake_outputs)
         
-        # Feature matching loss with per-discriminator logging
+        # Feature matching loss (L_fm) - averaged over all sub-discriminators and layers
+        # with per-discriminator logging
         fm_loss, per_disc_fm_losses = self.compute_feature_matching_loss(
             real_feature_maps, fake_feature_maps, return_per_discriminator=True
         )
         
-        # Mel reconstruction loss
+        # Mel reconstruction loss (L_mel)
         if self.use_mel_loss:
             mel_loss = self.mel_reconstruction_loss(wav_real, wav_fake)
         else:
@@ -839,7 +882,7 @@ class VocoderLoss(nn.Module):
         sc_loss, mag_loss = self.compute_stft_loss(wav_real, wav_fake)
         stft_loss = sc_loss + mag_loss
         
-        # Total generator loss
+        # Total generator loss with weighted components
         gen_loss = (
             adv_loss +
             self.feature_matching_weight * fm_loss +
@@ -847,18 +890,20 @@ class VocoderLoss(nn.Module):
             self.stft_loss_weight * stft_loss
         )
         
-        # Prepare loss dictionary
+        # Prepare loss dictionary with separate components for logging
+        # Returns L_adv, L_mel, L_fm as separate components as required
         loss_dict = {
             'gen_loss': gen_loss.item(),
-            'gen_adv_loss': adv_loss.item(),
-            'gen_fm_loss': fm_loss.item(),
-            'gen_mel_loss': mel_loss.item() if self.use_mel_loss else 0.0,
+            'gen_adv_loss': adv_loss.item(),  # L_adv
+            'gen_fm_loss': fm_loss.item(),    # L_fm
+            'gen_mel_loss': mel_loss.item() if self.use_mel_loss else 0.0,  # L_mel
             'gen_sc_loss': sc_loss.item(),
             'gen_mag_loss': mag_loss.item(),
             'gen_stft_loss': stft_loss.item()
         }
         
         # Add per-discriminator feature matching losses for detailed logging
+        # This helps monitor contribution from each sub-discriminator (MSD and MPD)
         if per_disc_fm_losses is not None:
             for i, disc_fm_loss in enumerate(per_disc_fm_losses):
                 loss_dict[f'gen_fm_loss_disc_{i}'] = disc_fm_loss

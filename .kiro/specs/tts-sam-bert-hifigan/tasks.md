@@ -287,7 +287,10 @@
   - Add logging for per-discriminator FM loss contributions
   - _Requirements: 14.2_
 
-- [-] 22. Implement multi-discriminator loss aggregation
+- [x] 22. Implement multi-discriminator loss aggregation
+
+
+
 
 
   - Update VocoderLoss to handle list of discriminators (MSD and MPD sub-discriminators)
