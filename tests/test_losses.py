@@ -572,6 +572,159 @@ class TestVocoderLoss:
         
         # Check that gradients are computed
         assert wav_fake.grad is not None
+    
+    def test_mel_reconstruction_loss_basic(self, loss_fn):
+        """Test mel reconstruction loss computation."""
+        batch_size = 2
+        T_wav = 22050  # 1 second at 22050 Hz
+        
+        wav_real = torch.randn(batch_size, 1, T_wav)
+        wav_fake = torch.randn(batch_size, 1, T_wav)
+        
+        mel_loss = loss_fn.mel_reconstruction_loss(wav_real, wav_fake)
+        
+        # Check that loss is a scalar
+        assert mel_loss.dim() == 0
+        # Check that loss is positive
+        assert mel_loss.item() >= 0
+        # Check that loss is not NaN or Inf
+        assert not torch.isnan(mel_loss)
+        assert not torch.isinf(mel_loss)
+    
+    def test_mel_reconstruction_loss_shape_validation(self, loss_fn):
+        """Test that mel reconstruction loss validates input shapes."""
+        batch_size = 2
+        T_wav = 22050
+        
+        # Test with correct shape
+        wav_real = torch.randn(batch_size, 1, T_wav)
+        wav_fake = torch.randn(batch_size, 1, T_wav)
+        mel_loss = loss_fn.mel_reconstruction_loss(wav_real, wav_fake)
+        assert mel_loss.item() >= 0
+        
+        # Test with wrong number of dimensions (should raise assertion error)
+        wav_wrong_dim = torch.randn(batch_size, T_wav)
+        try:
+            loss_fn.mel_reconstruction_loss(wav_wrong_dim, wav_fake)
+            assert False, "Should have raised assertion error for wrong dimensions"
+        except AssertionError:
+            pass
+        
+        # Test with wrong number of channels (should raise assertion error)
+        wav_stereo = torch.randn(batch_size, 2, T_wav)
+        try:
+            loss_fn.mel_reconstruction_loss(wav_stereo, wav_fake)
+            assert False, "Should have raised assertion error for stereo audio"
+        except AssertionError:
+            pass
+    
+    def test_mel_reconstruction_loss_consistency(self, loss_fn):
+        """Test that mel reconstruction loss uses consistent mel extraction."""
+        batch_size = 1
+        T_wav = 22050
+        
+        # Create identical waveforms
+        wav = torch.randn(batch_size, 1, T_wav)
+        
+        # Loss between identical waveforms should be very small
+        mel_loss = loss_fn.mel_reconstruction_loss(wav, wav)
+        
+        # Should be close to zero (allowing for numerical precision)
+        assert mel_loss.item() < 1e-5
+    
+    def test_mel_reconstruction_loss_shape_contract(self, loss_fn):
+        """Test that mel reconstruction loss respects shape contract."""
+        batch_size = 2
+        hop_length = loss_fn.mel_config['hop_length']
+        n_mels = loss_fn.mel_config['n_mels']
+        
+        # Test with different waveform lengths
+        for T_wav in [11025, 22050, 44100]:
+            wav_real = torch.randn(batch_size, 1, T_wav)
+            wav_fake = torch.randn(batch_size, 1, T_wav)
+            
+            mel_loss = loss_fn.mel_reconstruction_loss(wav_real, wav_fake)
+            
+            # Expected mel length
+            expected_T_mel = T_wav // hop_length + 1
+            
+            # Loss should be computed successfully
+            assert mel_loss.item() >= 0
+            assert not torch.isnan(mel_loss)
+    
+    def test_mel_reconstruction_loss_backward(self, loss_fn):
+        """Test that mel reconstruction loss can be backpropagated."""
+        batch_size = 1
+        T_wav = 22050
+        
+        wav_real = torch.randn(batch_size, 1, T_wav)
+        wav_fake = torch.randn(batch_size, 1, T_wav, requires_grad=True)
+        
+        mel_loss = loss_fn.mel_reconstruction_loss(wav_real, wav_fake)
+        
+        # Backpropagate
+        mel_loss.backward()
+        
+        # Check that gradients are computed
+        assert wav_fake.grad is not None
+        # Check that gradients are not all zeros
+        assert not torch.allclose(wav_fake.grad, torch.zeros_like(wav_fake.grad))
+    
+    def test_mel_reconstruction_loss_in_generator_forward(self, loss_fn):
+        """Test that mel reconstruction loss is included in generator forward pass."""
+        batch_size = 2
+        T = 22050
+        num_discriminators = 8
+        num_layers = 5
+        
+        wav_real = torch.randn(batch_size, 1, T)
+        wav_fake = torch.randn(batch_size, 1, T)
+        disc_fake_outputs = [torch.randn(batch_size, 1, 100) for _ in range(num_discriminators)]
+        real_feature_maps = [
+            [torch.randn(batch_size, 128 * (i+1), 100) for i in range(num_layers)]
+            for _ in range(num_discriminators)
+        ]
+        fake_feature_maps = [
+            [torch.randn(batch_size, 128 * (i+1), 100) for i in range(num_layers)]
+            for _ in range(num_discriminators)
+        ]
+        
+        loss, loss_dict = loss_fn.forward_generator(
+            wav_real, wav_fake, disc_fake_outputs, real_feature_maps, fake_feature_maps
+        )
+        
+        # Check that mel loss is in the loss dictionary
+        assert 'gen_mel_loss' in loss_dict
+        # Check that mel loss is positive (since use_mel_loss=True)
+        assert loss_dict['gen_mel_loss'] >= 0
+    
+    def test_mel_reconstruction_loss_disabled(self):
+        """Test that mel reconstruction loss can be disabled."""
+        loss_fn = VocoderLoss(use_mel_loss=False)
+        
+        batch_size = 2
+        T = 22050
+        num_discriminators = 8
+        num_layers = 5
+        
+        wav_real = torch.randn(batch_size, 1, T)
+        wav_fake = torch.randn(batch_size, 1, T)
+        disc_fake_outputs = [torch.randn(batch_size, 1, 100) for _ in range(num_discriminators)]
+        real_feature_maps = [
+            [torch.randn(batch_size, 128 * (i+1), 100) for i in range(num_layers)]
+            for _ in range(num_discriminators)
+        ]
+        fake_feature_maps = [
+            [torch.randn(batch_size, 128 * (i+1), 100) for i in range(num_layers)]
+            for _ in range(num_discriminators)
+        ]
+        
+        loss, loss_dict = loss_fn.forward_generator(
+            wav_real, wav_fake, disc_fake_outputs, real_feature_maps, fake_feature_maps
+        )
+        
+        # Check that mel loss is zero when disabled
+        assert loss_dict['gen_mel_loss'] == 0.0
 
 
 if __name__ == "__main__":

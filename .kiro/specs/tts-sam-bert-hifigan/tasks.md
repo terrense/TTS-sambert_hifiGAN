@@ -260,7 +260,12 @@
   - Add shape logging
   - _Requirements: 12.1, 13.1, 13.2_
 
-- [ ] 20. Implement HiFi-GAN mel reconstruction loss
+- [x] 20. Implement HiFi-GAN mel reconstruction loss
+
+
+
+
+
   - Add mel_reconstruction_loss() to models/losses.py or VocoderLoss class
   - Extract mel from both real and generated waveforms using identical mel config from config.yaml
   - Compute L1 distance between real_mel and generated_mel

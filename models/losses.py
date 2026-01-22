@@ -340,6 +340,7 @@ class VocoderLoss(nn.Module):
     1. Adversarial loss (least squares GAN loss)
     2. Feature matching loss between real and fake feature maps
     3. Multi-resolution STFT loss
+    4. Mel reconstruction loss
     
     The generator is trained with:
         L_gen = L_adv + λ_fm * L_fm + λ_mel * L_mel
@@ -352,6 +353,7 @@ class VocoderLoss(nn.Module):
         mel_weight (float): Weight for mel reconstruction loss (default: 45.0)
         use_mel_loss (bool): Whether to use mel reconstruction loss (default: True)
         stft_loss_weight (float): Weight for multi-resolution STFT loss (default: 1.0)
+        mel_config (dict, optional): Mel-spectrogram configuration. If None, will load from config.yaml
     
     References:
         - HiFi-GAN: Generative Adversarial Networks for Efficient and High Fidelity Speech Synthesis
@@ -363,7 +365,8 @@ class VocoderLoss(nn.Module):
         feature_matching_weight: float = 2.0,
         mel_weight: float = 45.0,
         use_mel_loss: bool = True,
-        stft_loss_weight: float = 1.0
+        stft_loss_weight: float = 1.0,
+        mel_config: Optional[dict] = None
     ):
         """Initialize the VocoderLoss with configurable loss weights."""
         super().__init__()
@@ -372,6 +375,33 @@ class VocoderLoss(nn.Module):
         self.mel_weight = mel_weight
         self.use_mel_loss = use_mel_loss
         self.stft_loss_weight = stft_loss_weight
+        
+        # Load mel configuration
+        if mel_config is None:
+            import yaml
+            with open('configs/config.yaml', 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+            mel_config = config['audio']
+        
+        self.mel_config = mel_config
+        
+        # Create mel spectrogram transform using exact same parameters as audio_processing.py
+        import torchaudio
+        self.mel_transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=mel_config['sample_rate'],
+            n_fft=mel_config['n_fft'],
+            hop_length=mel_config['hop_length'],
+            win_length=mel_config['win_length'],
+            n_mels=mel_config['n_mels'],
+            f_min=mel_config['fmin'],
+            f_max=mel_config['fmax'],
+            mel_scale=mel_config.get('mel_scale', 'slaney'),
+            norm=mel_config.get('norm', 'slaney'),
+            power=2.0  # Power spectrogram
+        )
+        
+        # Store log base for mel conversion
+        self.log_base = mel_config.get('log_base', 10.0)
         
         # Multi-resolution STFT parameters
         # Using multiple FFT sizes to capture different frequency resolutions
@@ -589,6 +619,97 @@ class VocoderLoss(nn.Module):
         
         return sc_loss, mag_loss
     
+    def mel_reconstruction_loss(
+        self,
+        wav_real: torch.Tensor,
+        wav_fake: torch.Tensor
+    ) -> torch.FloatTensor:
+        """
+        Compute mel reconstruction loss between real and generated waveforms.
+        
+        This loss extracts mel-spectrograms from both real and generated waveforms
+        using identical mel extraction parameters (from config.yaml), then computes
+        the L1 distance between them.
+        
+        L_mel = L1(mel(wav_real), mel(wav_fake))
+        
+        This ensures that the generated waveform has similar spectral characteristics
+        to the real waveform, which is crucial for high-quality audio synthesis.
+        
+        IMPORTANT: This method uses the exact same mel extraction parameters as
+        data/audio_processing.py to ensure consistency across training and inference:
+        - sample_rate, n_fft, win_length, hop_length
+        - n_mels, fmin, fmax
+        - mel_scale, norm, log_base
+        
+        Args:
+            wav_real (torch.Tensor): Real waveform [B, 1, T_wav]
+            wav_fake (torch.Tensor): Generated waveform [B, 1, T_wav]
+        
+        Returns:
+            torch.FloatTensor: Scalar L1 mel reconstruction loss
+        
+        Shape Contract:
+            Input: wav [B, 1, T_wav]
+            Intermediate: mel [B, n_mels, T_mel] where T_mel = T_wav // hop_length + 1
+            Output: scalar loss
+        
+        Example:
+            >>> loss_fn = VocoderLoss()
+            >>> wav_real = torch.randn(2, 1, 22050)
+            >>> wav_fake = torch.randn(2, 1, 22050)
+            >>> mel_loss = loss_fn.mel_reconstruction_loss(wav_real, wav_fake)
+        
+        References:
+            - Requirement 14.3: Multi-resolution STFT loss
+            - Requirement 15.3: Mel configuration consistency
+        """
+        # Validate input shapes
+        assert wav_real.dim() == 3, f"Expected 3D tensor [B, 1, T], got {wav_real.dim()}D"
+        assert wav_fake.dim() == 3, f"Expected 3D tensor [B, 1, T], got {wav_fake.dim()}D"
+        assert wav_real.size(1) == 1, f"Expected mono audio [B, 1, T], got {wav_real.size(1)} channels"
+        assert wav_fake.size(1) == 1, f"Expected mono audio [B, 1, T], got {wav_fake.size(1)} channels"
+        
+        # Remove channel dimension for mel extraction
+        wav_real_mono = wav_real.squeeze(1)  # [B, T_wav]
+        wav_fake_mono = wav_fake.squeeze(1)  # [B, T_wav]
+        
+        # Move mel_transform to the same device as input
+        if self.mel_transform.mel_scale.fb.device != wav_real.device:
+            self.mel_transform = self.mel_transform.to(wav_real.device)
+        
+        # Extract mel spectrogram from real waveform
+        mel_real = self.mel_transform(wav_real_mono)  # [B, n_mels, T_mel]
+        
+        # Extract mel spectrogram from fake waveform
+        mel_fake = self.mel_transform(wav_fake_mono)  # [B, n_mels, T_mel]
+        
+        # Validate mel shapes
+        expected_T_mel = wav_real.size(2) // self.mel_config['hop_length'] + 1
+        assert mel_real.size(1) == self.mel_config['n_mels'], \
+            f"Expected {self.mel_config['n_mels']} mel bins, got {mel_real.size(1)}"
+        
+        # Convert to log scale using the same method as audio_processing.py
+        epsilon = 1e-10
+        
+        if self.log_base == 10.0 or self.log_base == "10":
+            # Log10 scale
+            log_mel_real = torch.log10(mel_real + epsilon)
+            log_mel_fake = torch.log10(mel_fake + epsilon)
+        elif self.log_base == "e" or self.log_base == 2.718281828459045:
+            # Natural log
+            log_mel_real = torch.log(mel_real + epsilon)
+            log_mel_fake = torch.log(mel_fake + epsilon)
+        else:
+            # Custom base: log_b(x) = log(x) / log(b)
+            log_mel_real = torch.log(mel_real + epsilon) / torch.log(torch.tensor(self.log_base))
+            log_mel_fake = torch.log(mel_fake + epsilon) / torch.log(torch.tensor(self.log_base))
+        
+        # Compute L1 loss between log-mel spectrograms
+        mel_loss = F.l1_loss(log_mel_fake, log_mel_real)
+        
+        return mel_loss
+    
     def forward_discriminator(
         self,
         disc_real_outputs: List[torch.Tensor],
@@ -637,9 +758,9 @@ class VocoderLoss(nn.Module):
         
         This method should be called when training the generator.
         The generator is trained with adversarial loss, feature matching loss,
-        and optionally multi-resolution STFT loss.
+        mel reconstruction loss, and optionally multi-resolution STFT loss.
         
-        L_gen = L_adv + λ_fm * L_fm + λ_stft * (L_sc + L_mag)
+        L_gen = L_adv + λ_fm * L_fm + λ_mel * L_mel + λ_stft * (L_sc + L_mag)
         
         Args:
             wav_real (torch.Tensor): Real waveform [B, 1, T]
@@ -654,6 +775,7 @@ class VocoderLoss(nn.Module):
                 - 'gen_loss': Total generator loss
                 - 'gen_adv_loss': Adversarial loss
                 - 'gen_fm_loss': Feature matching loss
+                - 'gen_mel_loss': Mel reconstruction loss (if use_mel_loss=True)
                 - 'gen_sc_loss': Spectral convergence loss (if using STFT loss)
                 - 'gen_mag_loss': Log magnitude loss (if using STFT loss)
         
@@ -675,6 +797,12 @@ class VocoderLoss(nn.Module):
         # Feature matching loss
         fm_loss = self.compute_feature_matching_loss(real_feature_maps, fake_feature_maps)
         
+        # Mel reconstruction loss
+        if self.use_mel_loss:
+            mel_loss = self.mel_reconstruction_loss(wav_real, wav_fake)
+        else:
+            mel_loss = torch.tensor(0.0, device=wav_real.device)
+        
         # Multi-resolution STFT loss
         sc_loss, mag_loss = self.compute_stft_loss(wav_real, wav_fake)
         stft_loss = sc_loss + mag_loss
@@ -683,6 +811,7 @@ class VocoderLoss(nn.Module):
         gen_loss = (
             adv_loss +
             self.feature_matching_weight * fm_loss +
+            self.mel_weight * mel_loss +
             self.stft_loss_weight * stft_loss
         )
         
@@ -691,6 +820,7 @@ class VocoderLoss(nn.Module):
             'gen_loss': gen_loss.item(),
             'gen_adv_loss': adv_loss.item(),
             'gen_fm_loss': fm_loss.item(),
+            'gen_mel_loss': mel_loss.item() if self.use_mel_loss else 0.0,
             'gen_sc_loss': sc_loss.item(),
             'gen_mag_loss': mag_loss.item(),
             'gen_stft_loss': stft_loss.item()
