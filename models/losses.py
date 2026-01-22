@@ -490,8 +490,9 @@ class VocoderLoss(nn.Module):
     def compute_feature_matching_loss(
         self,
         real_feature_maps: List[List[torch.Tensor]],
-        fake_feature_maps: List[List[torch.Tensor]]
-    ) -> torch.FloatTensor:
+        fake_feature_maps: List[List[torch.Tensor]],
+        return_per_discriminator: bool = False
+    ) -> Tuple[torch.FloatTensor, Optional[List[float]]]:
         """
         Compute feature matching loss between real and fake feature maps.
         
@@ -502,39 +503,67 @@ class VocoderLoss(nn.Module):
         
         where D_i represents the i-th layer features of the discriminator.
         
+        This implementation:
+        1. Iterates over all discriminators (MSD + MPD)
+        2. For each discriminator, iterates over all layers
+        3. Computes L1 distance between real and fake feature maps
+        4. Detaches real features to prevent backprop into discriminator
+        5. Aggregates loss across all sub-discriminators using mean
+        6. Optionally returns per-discriminator loss contributions for logging
+        
         Args:
             real_feature_maps (List[List[torch.Tensor]]): Feature maps from real audio
                 Outer list: one per discriminator (MSD + MPD)
                 Inner list: one per layer in that discriminator
             fake_feature_maps (List[List[torch.Tensor]]): Feature maps from fake audio
                 Same structure as real_feature_maps
+            return_per_discriminator (bool): If True, return per-discriminator losses
+                for logging purposes (default: False)
         
         Returns:
-            torch.FloatTensor: Scalar feature matching loss
+            loss (torch.FloatTensor): Scalar feature matching loss (averaged over all layers)
+            per_disc_losses (Optional[List[float]]): Per-discriminator loss contributions
+                Only returned if return_per_discriminator=True, otherwise None
         
         Example:
             >>> loss_fn = VocoderLoss()
             >>> # Each discriminator has multiple layers
             >>> real_fmaps = [[torch.randn(2, 128, 100) for _ in range(5)] for _ in range(8)]
             >>> fake_fmaps = [[torch.randn(2, 128, 100) for _ in range(5)] for _ in range(8)]
-            >>> loss = loss_fn.compute_feature_matching_loss(real_fmaps, fake_fmaps)
+            >>> loss, per_disc = loss_fn.compute_feature_matching_loss(
+            ...     real_fmaps, fake_fmaps, return_per_discriminator=True
+            ... )
+            >>> print(f"Total FM loss: {loss.item():.4f}")
+            >>> for i, disc_loss in enumerate(per_disc):
+            ...     print(f"Discriminator {i} FM loss: {disc_loss:.4f}")
         """
-        loss = 0.0
+        total_loss = 0.0
+        per_discriminator_losses = [] if return_per_discriminator else None
         
         # Iterate over discriminators
-        for real_fmap_list, fake_fmap_list in zip(real_feature_maps, fake_feature_maps):
+        for disc_idx, (real_fmap_list, fake_fmap_list) in enumerate(zip(real_feature_maps, fake_feature_maps)):
+            disc_loss = 0.0
+            
             # Iterate over layers within each discriminator
             for real_fmap, fake_fmap in zip(real_fmap_list, fake_fmap_list):
                 # Compute L1 distance between real and fake features
                 # Detach real features to prevent backprop into discriminator
-                loss += F.l1_loss(fake_fmap, real_fmap.detach())
+                layer_loss = F.l1_loss(fake_fmap, real_fmap.detach())
+                disc_loss += layer_loss
+            
+            # Average over layers in this discriminator
+            disc_loss = disc_loss / len(real_fmap_list)
+            total_loss += disc_loss
+            
+            # Store per-discriminator loss for logging
+            if return_per_discriminator:
+                per_discriminator_losses.append(disc_loss.item())
         
-        # Average over all feature maps
+        # Average over all discriminators
         num_discriminators = len(real_feature_maps)
-        num_layers = sum(len(fmap_list) for fmap_list in real_feature_maps)
-        loss = loss / num_layers
+        total_loss = total_loss / num_discriminators
         
-        return loss
+        return total_loss, per_discriminator_losses
     
     def compute_stft_loss(
         self,
@@ -775,6 +804,7 @@ class VocoderLoss(nn.Module):
                 - 'gen_loss': Total generator loss
                 - 'gen_adv_loss': Adversarial loss
                 - 'gen_fm_loss': Feature matching loss
+                - 'gen_fm_loss_disc_N': Per-discriminator FM loss (N = 0, 1, 2, ...)
                 - 'gen_mel_loss': Mel reconstruction loss (if use_mel_loss=True)
                 - 'gen_sc_loss': Spectral convergence loss (if using STFT loss)
                 - 'gen_mag_loss': Log magnitude loss (if using STFT loss)
@@ -794,8 +824,10 @@ class VocoderLoss(nn.Module):
         # Adversarial loss
         adv_loss = self.compute_generator_adversarial_loss(disc_fake_outputs)
         
-        # Feature matching loss
-        fm_loss = self.compute_feature_matching_loss(real_feature_maps, fake_feature_maps)
+        # Feature matching loss with per-discriminator logging
+        fm_loss, per_disc_fm_losses = self.compute_feature_matching_loss(
+            real_feature_maps, fake_feature_maps, return_per_discriminator=True
+        )
         
         # Mel reconstruction loss
         if self.use_mel_loss:
@@ -825,5 +857,10 @@ class VocoderLoss(nn.Module):
             'gen_mag_loss': mag_loss.item(),
             'gen_stft_loss': stft_loss.item()
         }
+        
+        # Add per-discriminator feature matching losses for detailed logging
+        if per_disc_fm_losses is not None:
+            for i, disc_fm_loss in enumerate(per_disc_fm_losses):
+                loss_dict[f'gen_fm_loss_disc_{i}'] = disc_fm_loss
         
         return gen_loss, loss_dict

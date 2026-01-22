@@ -441,12 +441,30 @@ class TestVocoderLoss:
             for _ in range(num_discriminators)
         ]
         
-        loss = loss_fn.compute_feature_matching_loss(real_feature_maps, fake_feature_maps)
+        # Test without per-discriminator logging
+        loss, per_disc_losses = loss_fn.compute_feature_matching_loss(real_feature_maps, fake_feature_maps)
         
         # Check that loss is a scalar
         assert loss.dim() == 0
         # Check that loss is positive
         assert loss.item() >= 0
+        # Check that per_disc_losses is None when not requested
+        assert per_disc_losses is None
+        
+        # Test with per-discriminator logging
+        loss_with_logging, per_disc_losses = loss_fn.compute_feature_matching_loss(
+            real_feature_maps, fake_feature_maps, return_per_discriminator=True
+        )
+        
+        # Check that loss is the same
+        assert torch.allclose(loss, loss_with_logging)
+        # Check that per_disc_losses is a list
+        assert isinstance(per_disc_losses, list)
+        # Check that we have one loss per discriminator
+        assert len(per_disc_losses) == num_discriminators
+        # Check that all per-discriminator losses are positive
+        for disc_loss in per_disc_losses:
+            assert disc_loss >= 0
     
     def test_compute_stft_loss(self, loss_fn):
         """Test multi-resolution STFT loss computation."""
@@ -517,6 +535,12 @@ class TestVocoderLoss:
         assert 'gen_sc_loss' in loss_dict
         assert 'gen_mag_loss' in loss_dict
         assert 'gen_stft_loss' in loss_dict
+        
+        # Check that per-discriminator FM losses are logged
+        for i in range(num_discriminators):
+            key = f'gen_fm_loss_disc_{i}'
+            assert key in loss_dict, f"Missing per-discriminator FM loss for discriminator {i}"
+            assert loss_dict[key] >= 0, f"Per-discriminator FM loss for disc {i} should be non-negative"
         
         # Check that all losses are positive
         assert loss_dict['gen_loss'] >= 0

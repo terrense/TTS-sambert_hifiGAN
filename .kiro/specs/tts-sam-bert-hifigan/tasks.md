@@ -273,7 +273,12 @@
   - Add shape validation: mel input [B, n_mels, T_mel], wav output [B, 1, T_wav] where T_wav == T_mel * hop_length
   - _Requirements: 14.3, 15.3_
 
-- [ ] 21. Implement feature matching loss
+- [x] 21. Implement feature matching loss
+
+
+
+
+
   - Add feature_matching_loss() to VocoderLoss class
   - Extract intermediate feature maps from discriminators (both MSD and MPD)
   - Compute L1 distance between real and fake feature maps at each layer
@@ -282,7 +287,9 @@
   - Add logging for per-discriminator FM loss contributions
   - _Requirements: 14.2_
 
-- [ ] 22. Implement multi-discriminator loss aggregation
+- [-] 22. Implement multi-discriminator loss aggregation
+
+
   - Update VocoderLoss to handle list of discriminators (MSD and MPD sub-discriminators)
   - Aggregate adversarial loss across all sub-discriminators
   - Aggregate feature matching loss across all sub-discriminators
