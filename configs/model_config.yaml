@@ -62,3 +62,10 @@ vocoder:
     
     # Multi-Scale Discriminator
     msd_scales: 3  # Number of discriminators at different scales
+  
+  # Training ablation modes
+  # Options: "mel_only", "adv_mel", "adv_mel_fm"
+  # - mel_only: Train generator with only mel reconstruction loss, skip discriminators
+  # - adv_mel: Train generator with adversarial + mel loss, train discriminators normally
+  # - adv_mel_fm: Train generator with adversarial + mel + feature matching loss, train discriminators normally
+  loss_mode: "adv_mel_fm"  # Default: full training with all losses

@@ -300,7 +300,10 @@
   - Return separate loss components: L_adv, L_mel, L_fm for logging
   - _Requirements: 13.3, 13.4, 14.1, 14.2_
 
-- [ ] 23. Implement HiFi-GAN training ablation modes
+- [-] 23. Implement HiFi-GAN training ablation modes
+
+
+
   - Add loss_mode config parameter to model_config.yaml with options: "mel_only", "adv_mel", "adv_mel_fm"
   - Implement mel_only mode: train generator with only mel reconstruction loss, freeze or skip discriminators
   - Implement adv_mel mode: train generator with adversarial + mel loss, train discriminators normally

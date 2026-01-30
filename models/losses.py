@@ -348,12 +348,18 @@ class VocoderLoss(nn.Module):
     The discriminator is trained with:
         L_disc = L_adv_real + L_adv_fake
     
+    Training Ablation Modes:
+        - "mel_only": Train generator with only mel reconstruction loss, skip discriminators
+        - "adv_mel": Train generator with adversarial + mel loss, train discriminators normally
+        - "adv_mel_fm": Train generator with adversarial + mel + feature matching loss, train discriminators normally
+    
     Args:
         feature_matching_weight (float): Weight for feature matching loss (default: 2.0)
         mel_weight (float): Weight for mel reconstruction loss (default: 45.0)
         use_mel_loss (bool): Whether to use mel reconstruction loss (default: True)
         stft_loss_weight (float): Weight for multi-resolution STFT loss (default: 1.0)
         mel_config (dict, optional): Mel-spectrogram configuration. If None, will load from config.yaml
+        loss_mode (str): Training ablation mode - "mel_only", "adv_mel", or "adv_mel_fm" (default: "adv_mel_fm")
     
     References:
         - HiFi-GAN: Generative Adversarial Networks for Efficient and High Fidelity Speech Synthesis
@@ -366,15 +372,34 @@ class VocoderLoss(nn.Module):
         mel_weight: float = 45.0,
         use_mel_loss: bool = True,
         stft_loss_weight: float = 1.0,
-        mel_config: Optional[dict] = None
+        mel_config: Optional[dict] = None,
+        loss_mode: str = "adv_mel_fm"
     ):
-        """Initialize the VocoderLoss with configurable loss weights."""
+        """Initialize the VocoderLoss with configurable loss weights and training mode."""
         super().__init__()
         
+        # Validate loss_mode
+        valid_modes = ["mel_only", "adv_mel", "adv_mel_fm"]
+        if loss_mode not in valid_modes:
+            raise ValueError(f"Invalid loss_mode '{loss_mode}'. Must be one of {valid_modes}")
+        
+        self.loss_mode = loss_mode
         self.feature_matching_weight = feature_matching_weight
         self.mel_weight = mel_weight
         self.use_mel_loss = use_mel_loss
         self.stft_loss_weight = stft_loss_weight
+        
+        # Log the active training mode
+        print(f"[VocoderLoss] Initialized with loss_mode='{loss_mode}'")
+        if loss_mode == "mel_only":
+            print("[VocoderLoss] Mode: mel_only - Training generator with only mel reconstruction loss")
+            print("[VocoderLoss] Discriminators will be skipped/frozen")
+        elif loss_mode == "adv_mel":
+            print("[VocoderLoss] Mode: adv_mel - Training with adversarial + mel loss")
+            print("[VocoderLoss] Feature matching loss is disabled")
+        elif loss_mode == "adv_mel_fm":
+            print("[VocoderLoss] Mode: adv_mel_fm - Training with adversarial + mel + feature matching loss")
+            print("[VocoderLoss] Full training mode with all losses enabled")
         
         # Load mel configuration
         if mel_config is None:
@@ -810,18 +835,24 @@ class VocoderLoss(nn.Module):
         self,
         wav_real: torch.Tensor,
         wav_fake: torch.Tensor,
-        disc_fake_outputs: List[torch.Tensor],
-        real_feature_maps: List[List[torch.Tensor]],
-        fake_feature_maps: List[List[torch.Tensor]]
+        disc_fake_outputs: Optional[List[torch.Tensor]] = None,
+        real_feature_maps: Optional[List[List[torch.Tensor]]] = None,
+        fake_feature_maps: Optional[List[List[torch.Tensor]]] = None
     ) -> Tuple[torch.FloatTensor, Dict[str, float]]:
         """
-        Compute generator loss.
+        Compute generator loss based on the configured loss_mode.
         
         This method should be called when training the generator.
-        The generator is trained with adversarial loss, feature matching loss,
-        mel reconstruction loss, and optionally multi-resolution STFT loss.
+        The generator loss depends on the loss_mode:
         
-        L_gen = L_adv + λ_fm * L_fm + λ_mel * L_mel + λ_stft * (L_sc + L_mag)
+        - "mel_only": L_gen = λ_mel * L_mel
+          Only mel reconstruction loss, discriminators are not used
+          
+        - "adv_mel": L_gen = L_adv + λ_mel * L_mel
+          Adversarial loss + mel reconstruction loss
+          
+        - "adv_mel_fm": L_gen = L_adv + λ_fm * L_fm + λ_mel * L_mel + λ_stft * (L_sc + L_mag)
+          Full training with all losses (adversarial + feature matching + mel + STFT)
         
         Loss Aggregation Strategy:
         - L_adv: Averaged over all sub-discriminators (3 MSD + 5 MPD = 8 total)
@@ -832,30 +863,44 @@ class VocoderLoss(nn.Module):
         Args:
             wav_real (torch.Tensor): Real waveform [B, 1, T]
             wav_fake (torch.Tensor): Generated waveform [B, 1, T]
-            disc_fake_outputs (List[torch.Tensor]): Discriminator outputs for fake audio
+            disc_fake_outputs (Optional[List[torch.Tensor]]): Discriminator outputs for fake audio
+                Required for "adv_mel" and "adv_mel_fm" modes
                 Expected: 8 outputs (3 from MSD + 5 from MPD)
-            real_feature_maps (List[List[torch.Tensor]]): Feature maps from real audio
+            real_feature_maps (Optional[List[List[torch.Tensor]]]): Feature maps from real audio
+                Required for "adv_mel_fm" mode
                 Expected: 8 lists (3 from MSD + 5 from MPD), each with multiple layers
-            fake_feature_maps (List[List[torch.Tensor]]): Feature maps from fake audio
+            fake_feature_maps (Optional[List[List[torch.Tensor]]]): Feature maps from fake audio
+                Required for "adv_mel_fm" mode
                 Same structure as real_feature_maps
         
         Returns:
             loss (torch.FloatTensor): Total generator loss
             loss_dict (dict): Dictionary containing loss components:
                 - 'gen_loss': Total generator loss
-                - 'gen_adv_loss': Adversarial loss (L_adv)
-                - 'gen_fm_loss': Feature matching loss (L_fm)
+                - 'gen_adv_loss': Adversarial loss (L_adv) - only in adv_mel and adv_mel_fm modes
+                - 'gen_fm_loss': Feature matching loss (L_fm) - only in adv_mel_fm mode
                 - 'gen_mel_loss': Mel reconstruction loss (L_mel)
-                - 'gen_fm_loss_disc_N': Per-discriminator FM loss (N = 0, 1, 2, ...)
+                - 'gen_fm_loss_disc_N': Per-discriminator FM loss (N = 0, 1, 2, ...) - only in adv_mel_fm mode
                 - 'gen_sc_loss': Spectral convergence loss (if using STFT loss)
                 - 'gen_mag_loss': Log magnitude loss (if using STFT loss)
                 - 'gen_stft_loss': Total STFT loss
         
         Example:
-            >>> loss_fn = VocoderLoss()
+            >>> # mel_only mode
+            >>> loss_fn = VocoderLoss(loss_mode="mel_only")
             >>> wav_real = torch.randn(2, 1, 22050)
             >>> wav_fake = torch.randn(2, 1, 22050)
+            >>> loss, loss_dict = loss_fn.forward_generator(wav_real, wav_fake)
+            >>> loss.backward()
+            
+            >>> # adv_mel mode
+            >>> loss_fn = VocoderLoss(loss_mode="adv_mel")
             >>> disc_fake = [torch.randn(2, 1, 100) for _ in range(8)]
+            >>> loss, loss_dict = loss_fn.forward_generator(wav_real, wav_fake, disc_fake)
+            >>> loss.backward()
+            
+            >>> # adv_mel_fm mode (full)
+            >>> loss_fn = VocoderLoss(loss_mode="adv_mel_fm")
             >>> real_fmaps = [[torch.randn(2, 128, 100) for _ in range(5)] for _ in range(8)]
             >>> fake_fmaps = [[torch.randn(2, 128, 100) for _ in range(5)] for _ in range(8)]
             >>> loss, loss_dict = loss_fn.forward_generator(
@@ -863,49 +908,119 @@ class VocoderLoss(nn.Module):
             ... )
             >>> loss.backward()
         """
-        # Adversarial loss (L_adv) - averaged over all sub-discriminators
-        adv_loss = self.compute_generator_adversarial_loss(disc_fake_outputs)
+        # Initialize loss dictionary
+        loss_dict = {}
         
-        # Feature matching loss (L_fm) - averaged over all sub-discriminators and layers
-        # with per-discriminator logging
-        fm_loss, per_disc_fm_losses = self.compute_feature_matching_loss(
-            real_feature_maps, fake_feature_maps, return_per_discriminator=True
-        )
-        
-        # Mel reconstruction loss (L_mel)
+        # Mel reconstruction loss (L_mel) - always computed
         if self.use_mel_loss:
             mel_loss = self.mel_reconstruction_loss(wav_real, wav_fake)
         else:
             mel_loss = torch.tensor(0.0, device=wav_real.device)
         
-        # Multi-resolution STFT loss
-        sc_loss, mag_loss = self.compute_stft_loss(wav_real, wav_fake)
-        stft_loss = sc_loss + mag_loss
+        loss_dict['gen_mel_loss'] = mel_loss.item() if self.use_mel_loss else 0.0
         
-        # Total generator loss with weighted components
-        gen_loss = (
-            adv_loss +
-            self.feature_matching_weight * fm_loss +
-            self.mel_weight * mel_loss +
-            self.stft_loss_weight * stft_loss
-        )
+        # Mode-specific loss computation
+        if self.loss_mode == "mel_only":
+            # mel_only mode: Only mel reconstruction loss
+            gen_loss = self.mel_weight * mel_loss
+            
+            # Set other losses to zero for logging
+            loss_dict['gen_adv_loss'] = 0.0
+            loss_dict['gen_fm_loss'] = 0.0
+            loss_dict['gen_sc_loss'] = 0.0
+            loss_dict['gen_mag_loss'] = 0.0
+            loss_dict['gen_stft_loss'] = 0.0
+            
+        elif self.loss_mode == "adv_mel":
+            # adv_mel mode: Adversarial + mel loss
+            if disc_fake_outputs is None:
+                raise ValueError("disc_fake_outputs is required for 'adv_mel' mode")
+            
+            # Adversarial loss (L_adv)
+            adv_loss = self.compute_generator_adversarial_loss(disc_fake_outputs)
+            loss_dict['gen_adv_loss'] = adv_loss.item()
+            
+            # Multi-resolution STFT loss
+            sc_loss, mag_loss = self.compute_stft_loss(wav_real, wav_fake)
+            stft_loss = sc_loss + mag_loss
+            loss_dict['gen_sc_loss'] = sc_loss.item()
+            loss_dict['gen_mag_loss'] = mag_loss.item()
+            loss_dict['gen_stft_loss'] = stft_loss.item()
+            
+            # Total generator loss (no feature matching)
+            gen_loss = (
+                adv_loss +
+                self.mel_weight * mel_loss +
+                self.stft_loss_weight * stft_loss
+            )
+            
+            # Set feature matching loss to zero for logging
+            loss_dict['gen_fm_loss'] = 0.0
+            
+        elif self.loss_mode == "adv_mel_fm":
+            # adv_mel_fm mode: Full training with all losses
+            if disc_fake_outputs is None:
+                raise ValueError("disc_fake_outputs is required for 'adv_mel_fm' mode")
+            if real_feature_maps is None or fake_feature_maps is None:
+                raise ValueError("real_feature_maps and fake_feature_maps are required for 'adv_mel_fm' mode")
+            
+            # Adversarial loss (L_adv) - averaged over all sub-discriminators
+            adv_loss = self.compute_generator_adversarial_loss(disc_fake_outputs)
+            loss_dict['gen_adv_loss'] = adv_loss.item()
+            
+            # Feature matching loss (L_fm) - averaged over all sub-discriminators and layers
+            # with per-discriminator logging
+            fm_loss, per_disc_fm_losses = self.compute_feature_matching_loss(
+                real_feature_maps, fake_feature_maps, return_per_discriminator=True
+            )
+            loss_dict['gen_fm_loss'] = fm_loss.item()
+            
+            # Multi-resolution STFT loss
+            sc_loss, mag_loss = self.compute_stft_loss(wav_real, wav_fake)
+            stft_loss = sc_loss + mag_loss
+            loss_dict['gen_sc_loss'] = sc_loss.item()
+            loss_dict['gen_mag_loss'] = mag_loss.item()
+            loss_dict['gen_stft_loss'] = stft_loss.item()
+            
+            # Total generator loss with weighted components
+            gen_loss = (
+                adv_loss +
+                self.feature_matching_weight * fm_loss +
+                self.mel_weight * mel_loss +
+                self.stft_loss_weight * stft_loss
+            )
+            
+            # Add per-discriminator feature matching losses for detailed logging
+            # This helps monitor contribution from each sub-discriminator (MSD and MPD)
+            if per_disc_fm_losses is not None:
+                for i, disc_fm_loss in enumerate(per_disc_fm_losses):
+                    loss_dict[f'gen_fm_loss_disc_{i}'] = disc_fm_loss
         
-        # Prepare loss dictionary with separate components for logging
-        # Returns L_adv, L_mel, L_fm as separate components as required
-        loss_dict = {
-            'gen_loss': gen_loss.item(),
-            'gen_adv_loss': adv_loss.item(),  # L_adv
-            'gen_fm_loss': fm_loss.item(),    # L_fm
-            'gen_mel_loss': mel_loss.item() if self.use_mel_loss else 0.0,  # L_mel
-            'gen_sc_loss': sc_loss.item(),
-            'gen_mag_loss': mag_loss.item(),
-            'gen_stft_loss': stft_loss.item()
-        }
+        else:
+            raise ValueError(f"Invalid loss_mode: {self.loss_mode}")
         
-        # Add per-discriminator feature matching losses for detailed logging
-        # This helps monitor contribution from each sub-discriminator (MSD and MPD)
-        if per_disc_fm_losses is not None:
-            for i, disc_fm_loss in enumerate(per_disc_fm_losses):
-                loss_dict[f'gen_fm_loss_disc_{i}'] = disc_fm_loss
+        # Add total loss to dictionary
+        loss_dict['gen_loss'] = gen_loss.item()
         
         return gen_loss, loss_dict
+    
+    def should_train_discriminator(self) -> bool:
+        """
+        Check if discriminators should be trained based on the loss_mode.
+        
+        Returns:
+            bool: True if discriminators should be trained, False otherwise
+                - mel_only: False (discriminators are not used)
+                - adv_mel: True (discriminators are trained)
+                - adv_mel_fm: True (discriminators are trained)
+        
+        Example:
+            >>> loss_fn = VocoderLoss(loss_mode="mel_only")
+            >>> loss_fn.should_train_discriminator()
+            False
+            
+            >>> loss_fn = VocoderLoss(loss_mode="adv_mel")
+            >>> loss_fn.should_train_discriminator()
+            True
+        """
+        return self.loss_mode in ["adv_mel", "adv_mel_fm"]
